@@ -1,0 +1,19 @@
+# Switch-26B (MoE, MHA) -- Switch-Transformer-style, top-1 routing
+name: Switch-26B
+arch: moe
+attention: mha
+n_layers: 24
+d_model: 1024
+n_heads: 16
+n_kv_heads: 16           # MHA: g = 1 (no query grouping, reuse-free attention)
+d_head: 64
+d_ffn: 4096
+weight_bytes: 52.0e+9
+active_params: 1.4e+9
+kv_bytes_per_token: 96.0e+3
+moe:
+  enabled: true
+  n_experts: 128
+  top_k: 1
+  expert_bytes: 16.8e+6
+  dense_bytes: 0.7e+9

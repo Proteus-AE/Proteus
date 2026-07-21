@@ -1,0 +1,16 @@
+# Llama-3.1-70B (dense, GQA)  -- Table "Benchmarks" of the paper (Sec. V-A)
+name: Llama-3.1-70B
+arch: dense
+attention: gqa
+n_layers: 80
+d_model: 8192
+n_heads: 64
+n_kv_heads: 8            # query-group size g = 64/8 = 8
+d_head: 128
+d_ffn: 28672
+# Derived / bookkeeping (FP16)
+weight_bytes: 140.0e+9   # total parameter footprint
+active_params: 70.0e+9   # parameters touched per token (dense: all)
+kv_bytes_per_token: 320.0e+3   # 2 (K,V) * 2 B * n_kv_heads * d_head * n_layers
+moe:
+  enabled: false

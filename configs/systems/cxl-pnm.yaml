@@ -1,0 +1,21 @@
+# CXL-PNM baseline (HPCA'24): LPDDR-based CXL expander with channel-level PNM.
+# Conservatively strengthened with a controller-side 16 TFLOPS matrix engine per
+# device (CMM-Ax-class) so that it is never trivially compute-bound; see
+# the header comment of proteus_sim/baselines/cxl_pnm.py.
+name: CXL-PNM
+kind: cxl_pnm
+devices: 8
+capacity_per_device: 512.0e+9      # 4 TB total (LPDDR)
+bw_per_device: 1.0e+12             # channel-level PNM: external-class bandwidth
+stream_efficiency: 0.80
+flops_per_device: 16.0e+12         # strengthened controller engine [ASSUME]
+compute_efficiency: 0.80
+launch_overhead_ms: 0.3
+
+energy:
+  controller_w_per_device: 20.0
+  engine_full_load_w: 60.0         # ~3.5-4 pJ/FLOP incl. SRAM/NoC
+  static_w: 150.0
+  lpddr_ext_pj_per_bit: 4.5
+  background_w_per_gb: 0.08
+  background_idle_factor: 0.3

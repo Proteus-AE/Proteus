@@ -1,0 +1,24 @@
+# GPU baseline: 8x A100 DGX served by vLLM (continuous batching + PagedAttention)
+name: DGX-A100
+kind: gpu
+devices: 8
+hbm_capacity: 640.0e+9
+hbm_bw_aggregate: 16.0e+12
+usable_fraction: 0.90
+flops_fp16_aggregate: 2496.0e+12    # 8 x 312 TFLOPS
+
+efficiency:
+  weight_stream: 0.75          # sustained GEMM weight-streaming efficiency
+  attention: 0.60              # paged-attention kernel efficiency
+  # MoE expert fragmentation: effective streaming efficiency degrades when
+  # few tokens are routed per expert (kernel launch + tile underutilization).
+  moe_frag: {base: 0.40, span: 0.35, saturate_tpe: 32}
+  allreduce_overhead: 0.08     # tensor-parallel collectives per iteration
+  launch_overhead_ms: 0.3
+
+energy:
+  gpu_busy_w: 250.0
+  static_w: 150.0
+  hbm_pj_per_bit: 3.9
+  background_w_per_gb: 1.5
+  background_idle_factor: 0.3

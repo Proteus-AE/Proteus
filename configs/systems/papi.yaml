@@ -1,0 +1,33 @@
+# PAPI baseline (MICRO'24): heterogeneous system with dedicated Attn-PIM and
+# FC-PIM device pools (original 2:1 ratio) plus xPU processing units.
+# KV caches must reside in the Attn-PIM pool; weights are served from the
+# xPU-side memory (V-A capacity accounting).
+name: PAPI
+kind: papi
+devices: 8
+hbm_capacity: 256.0e+9
+usable_fraction: 0.90
+attn_pool_fraction: 0.6667         # 2/3 of devices host Attn-PIM
+attn_allbank_mult: 9.0             # all-bank internal bandwidth multiplier
+# Sustained Attn-PIM streaming efficiency per attention type: MLA's short
+# latent-KV rows amortize row activations poorly compared to GQA/MHA rows.
+attention_eff: {gqa: 0.70, mha: 0.70, mla: 0.40}
+fc_pim_allbank_mult: 9.0           # logic-die FC-PIM on the FC pool
+fc_pim_efficiency: 0.95
+# FC-PIM is GEMV-grade: it wins for small (xPU-fragmenting) experts; larger
+# skinny-GEMM operands run on the xPU.
+fc_pim_expert_bytes_max: 64.0e+6
+xpu_bw_aggregate: 16.0e+12
+weight_eff: {base: 0.40, span: 0.35, saturate_tpe: 32}   # xPU GEMM path
+overlap_overhead: 1.10
+launch_overhead_ms: 0.3
+
+energy:
+  xpu_busy_w: 250.0
+  xpu_idle_w: 80.0
+  pim_pe_w_per_device: 10.0
+  static_w: 150.0
+  hbm_pj_per_bit: 3.9
+  hbm_pim_int_pj_per_bit: 2.5
+  background_w_per_gb: 1.5
+  background_idle_factor: 0.3

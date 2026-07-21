@@ -1,0 +1,29 @@
+# NeuPIMs baseline (ASPLOS'24): heterogeneous NPU + HBM-PIM with dual row
+# buffers and sub-batch interleaving, enabling concurrent NPU GEMM and PIM
+# attention. Normalized to the same xPU compute throughput as Proteus (V-A).
+name: NeuPIMs
+kind: neupims
+devices: 8
+hbm_capacity: 256.0e+9             # 8 x 32 GB HBM-PIM stacks
+hbm_bw_aggregate: 16.0e+12
+usable_fraction: 0.90
+pim_internal_mult: 2.0             # dual-row-buffer PIM internal bandwidth
+pim_stream_efficiency: 0.80
+
+# NPU weight-GEMM sustained streaming efficiency grows with the active
+# weight working set (longer DMA bursts amortize per-kernel overheads) and
+# saturates: eff = min(cap, base + log2_slope * log2(active_weights_GB)).
+# Calibrated against NeuPIMs' published MHA-model behavior (A-NPU).
+weight_stream_curve: {base: 0.28, log2_slope: 0.077, cap: 0.70}
+attention_xpu_eff: 0.60            # NPU fallback path efficiency (GQA/MLA)
+overlap_overhead: 1.02             # sub-batch scheduling overhead
+
+energy:
+  npu_busy_w: 250.0
+  npu_idle_w: 80.0
+  pim_pe_w_per_device: 10.0
+  static_w: 150.0
+  hbm_pj_per_bit: 3.9
+  hbm_pim_int_pj_per_bit: 2.5
+  background_w_per_gb: 1.5
+  background_idle_factor: 0.3

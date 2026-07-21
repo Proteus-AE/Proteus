@@ -1,0 +1,269 @@
+Add the LPDDR5X-PIM device model (all-bank PIM command set,
+LPDDR5X-8533 timing preset, per-channel datapath mode register).
+
+New files only; applies to any Ramulator 2.0 tree.
+---
+diff --git a/src/dram/impl/LPDDR5X-PIM.cpp b/src/dram/impl/LPDDR5X-PIM.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/dram/impl/LPDDR5X-PIM.cpp
+@@ -0,0 +1,259 @@
++#include "dram/dram.h"
++#include "dram/lambdas.h"
++
++namespace Ramulator {
++
++// LPDDR5X-8533 device with near-bank PIM extensions.
++//
++// Extends the stock LPDDR5X command set with the all-bank PIM commands used
++// by ProteusSim's command-level backend: ACTab / PREab (lockstep row control
++// across every bank of a die), RDMAC / RDMACb (column read terminated at the
++// per-bank PE, direct or broadcast), WRab (KV append), and MODE (bank-group
++// datapath reconfiguration through the mode register).
++class LPDDR5XPIM : public IDRAM, public Implementation {
++  RAMULATOR_REGISTER_IMPLEMENTATION(IDRAM, LPDDR5XPIM, "LPDDR5X-PIM",
++                                    "LPDDR5X-8533 with near-bank PIM units.")
++
++ public:
++  inline static const std::map<std::string, Organization> org_presets = {
++      //   name              density  DQ   Ch Ra  Bg Ba   Ro      Co
++      {"LPDDR5X_8Gb_x16",   {8 << 10, 16, {1, 4,  4, 4, 1 << 14, 1 << 10}}},
++      {"LPDDR5X_16Gb_x16", {16 << 10, 16, {1, 4,  4, 4, 1 << 15, 1 << 10}}},
++  };
++
++  inline static const std::map<std::string, std::vector<int>> timing_presets = {
++      // rate   nBL nCL nRCD nRPab nRAS nRC nWR nRTP nCWL nCCDS nCCDL nRRDS nRRDL nWTRS nWTRL nFAW nRFCab nREFI
++      {"LPDDR5X_8533",
++       {8533, 4, 40, 39, 45, 90, 135, 73, 16, 22, 4, 8, 8, 16, 12, 22, 43, 598, 8355}},
++  };
++
++  /************************************************
++   *                Organization
++   ***********************************************/
++  const int m_internal_prefetch_size = 16;
++
++  inline static constexpr ImplDef m_levels = {
++      "channel", "rank", "bankgroup", "bank", "row", "column",
++  };
++
++  /************************************************
++   *             Requests & Commands
++   ***********************************************/
++  inline static constexpr ImplDef m_commands = {
++      "ACT",   "PRE",    "PREA",
++      "RD",    "WR",     "RDA",   "WRA",
++      "REFab", "REFpb",
++      // PIM extensions
++      "ACTab", "PREab",  "RDMAC", "RDMACb", "WRab", "MODE",
++  };
++
++  inline static const ImplLUT m_command_scopes = LUT(
++      m_commands, m_levels,
++      {
++          {"ACT", "row"},     {"PRE", "bank"},    {"PREA", "rank"},
++          {"RD", "column"},   {"WR", "column"},
++          {"RDA", "column"},  {"WRA", "column"},
++          {"REFab", "rank"},  {"REFpb", "bank"},
++          {"ACTab", "rank"},  {"PREab", "rank"},
++          {"RDMAC", "column"},{"RDMACb", "column"},
++          {"WRab", "column"}, {"MODE", "channel"},
++      });
++
++  inline static const ImplLUT m_command_meta =
++      LUT<DRAMCommandMeta>(m_commands, {
++          // open?  close?  access?  refresh?
++          {"ACT",    {true,  false, false, false}},
++          {"PRE",    {false, true,  false, false}},
++          {"PREA",   {false, true,  false, false}},
++          {"RD",     {false, false, true,  false}},
++          {"WR",     {false, false, true,  false}},
++          {"RDA",    {false, true,  true,  false}},
++          {"WRA",    {false, true,  true,  false}},
++          {"REFab",  {false, false, false, true}},
++          {"REFpb",  {false, false, false, true}},
++          {"ACTab",  {true,  false, false, false}},
++          {"PREab",  {false, true,  false, false}},
++          {"RDMAC",  {false, false, true,  false}},
++          {"RDMACb", {false, false, true,  false}},
++          {"WRab",   {false, false, true,  false}},
++          {"MODE",   {false, false, false, false}},
++      });
++
++  inline static constexpr ImplDef m_requests = {
++      "read", "write", "all-bank-refresh", "per-bank-refresh",
++      // PIM request types issued by the ProteusTraceReplay frontend
++      "pim-mac", "pim-mac-broadcast", "pim-write", "pim-mode",
++  };
++
++  inline static const ImplLUT m_request_translations = LUT(
++      m_requests, m_commands,
++      {
++          {"read", "RD"},
++          {"write", "WR"},
++          {"all-bank-refresh", "REFab"},
++          {"per-bank-refresh", "REFpb"},
++          {"pim-mac", "RDMAC"},
++          {"pim-mac-broadcast", "RDMACb"},
++          {"pim-write", "WRab"},
++          {"pim-mode", "MODE"},
++      });
++
++  /************************************************
++   *                   Timing
++   ***********************************************/
++  inline static constexpr ImplDef m_timings = {
++      "rate", "nBL", "nCL", "nRCD", "nRPab", "nRAS", "nRC", "nWR",
++      "nRTP", "nCWL", "nCCDS", "nCCDL", "nRRDS", "nRRDL", "nWTRS",
++      "nWTRL", "nFAW", "nRFCab", "nREFI",
++  };
++
++ public:
++  struct Node : public DRAMNodeBase<LPDDR5XPIM> {
++    // Per-channel PIM mode register: 0 = direct, 1 = broadcast (fanout 4).
++    int m_pim_mode = 0;
++    Node(LPDDR5XPIM* dram, Node* parent, int level, int id)
++        : DRAMNodeBase<LPDDR5XPIM>(dram, parent, level, id) {}
++  };
++  std::vector<Node*> m_channels;
++
++  FuncMatrix<ActionFunc_t<Node>> m_actions;
++  FuncMatrix<PreqFunc_t<Node>> m_preqs;
++  FuncMatrix<RowhitFunc_t<Node>> m_rowhits;
++  FuncMatrix<RowopenFunc_t<Node>> m_rowopens;
++
++  void init() override {
++    RAMULATOR_DECLARE_SPECS();
++    set_organization();
++    set_timing_vals();
++    set_actions();
++    set_preqs();
++    set_rowhits();
++    set_rowopens();
++    create_nodes();
++  }
++
++  void issue_command(int command, const AddrVec_t& addr_vec) override {
++    int channel_id = addr_vec[m_levels["channel"]];
++    if (command == m_commands["MODE"]) {
++      // Datapath reconfiguration: flip the channel mode register. The
++      // controller plugin enforces the FIFO-drain precondition.
++      m_channels[channel_id]->m_pim_mode ^= 1;
++      return;
++    }
++    m_channels[channel_id]->update_timing(command, addr_vec);
++    m_channels[channel_id]->update_states(command, addr_vec);
++  }
++
++  int get_preq_command(int command, const AddrVec_t& addr_vec) override {
++    int channel_id = addr_vec[m_levels["channel"]];
++    return m_channels[channel_id]->get_preq_command(command, addr_vec, m_clk);
++  }
++
++  bool check_ready(int command, const AddrVec_t& addr_vec) override {
++    int channel_id = addr_vec[m_levels["channel"]];
++    return m_channels[channel_id]->check_ready(command, addr_vec, m_clk);
++  }
++
++  bool check_rowbuffer_hit(int command, const AddrVec_t& addr_vec) override {
++    int channel_id = addr_vec[m_levels["channel"]];
++    return m_channels[channel_id]->check_rowbuffer_hit(command, addr_vec, m_clk);
++  }
++
++ private:
++  void set_organization() {
++    m_organization = org_presets.at(
++        param_group("org").param<std::string>("preset").required());
++    m_organization.count[m_levels["channel"]] =
++        param_group("org").param<int>("channel").default_val(1);
++    m_organization.count[m_levels["rank"]] =
++        param_group("org").param<int>("rank").default_val(4);
++  }
++
++  void set_timing_vals() {
++    m_timing_vals = timing_presets.at(
++        param_group("timing").param<std::string>("preset").required());
++    m_tCK_ps = 1e9 / (m_timing_vals("rate") / 2 / 1000);
++    // Populate the same-command CCD constraints for the PIM column
++    // commands: RDMAC follows the tCCDL cadence on the BG data bus,
++    // RDMACb the tCCDS cadence (one fetch feeds four banks).
++    populate_timingcons(
++        this,
++        {
++            {.level = "rank",
++             .preceding = {"RDMAC", "RDMACb", "WRab"},
++             .following = {"RDMAC", "RDMACb", "WRab"},
++             .latency = V("nCCDL")},
++            {.level = "rank",
++             .preceding = {"ACTab"},
++             .following = {"RDMAC", "RDMACb", "WRab"},
++             .latency = V("nRCD")},
++            {.level = "rank",
++             .preceding = {"ACTab"},
++             .following = {"ACTab"},
++             .latency = V("nRC")},
++            {.level = "rank",
++             .preceding = {"RDMAC", "RDMACb"},
++             .following = {"PREab"},
++             .latency = V("nRTP")},
++            {.level = "rank",
++             .preceding = {"WRab"},
++             .following = {"PREab"},
++             .latency = V("nCWL") + V("nBL") + V("nWR")},
++            {.level = "rank",
++             .preceding = {"PREab"},
++             .following = {"ACTab"},
++             .latency = V("nRPab")},
++            {.level = "channel",
++             .preceding = {"MODE"},
++             .following = {"RDMAC", "RDMACb", "WRab"},
++             .latency = V("nRPab")},   // conservative settle window
++        });
++  }
++
++  void set_actions() {
++    m_actions.resize(m_levels.size(),
++                     std::vector<ActionFunc_t<Node>>(m_commands.size()));
++    m_actions[m_levels["bank"]][m_commands["ACT"]] = Lambdas::Action::Bank::ACT<LPDDR5XPIM>;
++    m_actions[m_levels["bank"]][m_commands["PRE"]] = Lambdas::Action::Bank::PRE<LPDDR5XPIM>;
++    m_actions[m_levels["rank"]][m_commands["PREA"]] = Lambdas::Action::Rank::PREab<LPDDR5XPIM>;
++    // All-bank PIM row control: every bank of the rank opens/closes the
++    // same row index in lockstep.
++    m_actions[m_levels["rank"]][m_commands["ACTab"]] = Lambdas::Action::Rank::ACTab<LPDDR5XPIM>;
++    m_actions[m_levels["rank"]][m_commands["PREab"]] = Lambdas::Action::Rank::PREab<LPDDR5XPIM>;
++  }
++
++  void set_preqs() {
++    m_preqs.resize(m_levels.size(),
++                   std::vector<PreqFunc_t<Node>>(m_commands.size()));
++    m_preqs[m_levels["bank"]][m_commands["RD"]] = Lambdas::Preq::Bank::RequireRowOpen<LPDDR5XPIM>;
++    m_preqs[m_levels["bank"]][m_commands["WR"]] = Lambdas::Preq::Bank::RequireRowOpen<LPDDR5XPIM>;
++    m_preqs[m_levels["rank"]][m_commands["REFab"]] = Lambdas::Preq::Rank::RequireAllBanksClosed<LPDDR5XPIM>;
++    // PIM column commands require the lockstep row: same-row-open across
++    // the rank, else the prerequisite is ACTab (closing first if needed).
++    m_preqs[m_levels["rank"]][m_commands["RDMAC"]] = Lambdas::Preq::Rank::RequireSameRowsOpen<LPDDR5XPIM>;
++    m_preqs[m_levels["rank"]][m_commands["RDMACb"]] = Lambdas::Preq::Rank::RequireSameRowsOpen<LPDDR5XPIM>;
++    m_preqs[m_levels["rank"]][m_commands["WRab"]] = Lambdas::Preq::Rank::RequireSameRowsOpen<LPDDR5XPIM>;
++  }
++
++  void set_rowhits() {
++    m_rowhits.resize(m_levels.size(),
++                     std::vector<RowhitFunc_t<Node>>(m_commands.size()));
++    m_rowhits[m_levels["bank"]][m_commands["RD"]] = Lambdas::RowHit::Bank::RDWR<LPDDR5XPIM>;
++    m_rowhits[m_levels["bank"]][m_commands["WR"]] = Lambdas::RowHit::Bank::RDWR<LPDDR5XPIM>;
++  }
++
++  void set_rowopens() {
++    m_rowopens.resize(m_levels.size(),
++                      std::vector<RowopenFunc_t<Node>>(m_commands.size()));
++    m_rowopens[m_levels["bank"]][m_commands["RD"]] = Lambdas::RowOpen::Bank::RDWR<LPDDR5XPIM>;
++    m_rowopens[m_levels["bank"]][m_commands["WR"]] = Lambdas::RowOpen::Bank::RDWR<LPDDR5XPIM>;
++  }
++
++  void create_nodes() {
++    int num_channels = m_organization.count[m_levels["channel"]];
++    for (int i = 0; i < num_channels; i++)
++      m_channels.push_back(new Node(this, nullptr, 0, i));
++  }
++};
++
++}  // namespace Ramulator

@@ -1,0 +1,42 @@
+# Proteus device + system configuration (Table "System configuration", Sec. V-A)
+name: Proteus
+kind: proteus
+devices: 8
+memory: lpddr5x-8533           # -> configs/memory/lpddr5x-8533.yaml
+
+xpu:
+  flops_fp16: 312.0e+12        # A100-class matrix engine (fair-comparison setting)
+  # The xPU shares the unified LPDDR memory; its sustained streaming bandwidth
+  # over the external interface (concurrent with PIM row service):
+  mem_bw_per_device: 0.85e+12
+
+interconnect:
+  kind: cxl3-switch
+  link_gbps_per_dir: 128.0e+9
+  end_to_end_latency_ns: 165   # 25 port + 10 retimer + 70 switch + 60 ctrl/DRAM
+  per_stage_overhead_ms: 0.05  # activation staging + doorbell + stage sync
+  scheduling_overhead_ms: 0.01 # per-iteration crossover re-evaluation (Sec. IV-D)
+
+pipeline:
+  efficiency: 0.95             # bubble/imbalance factor of PP stages
+  # Decode is autoregressive: one batch cannot fill its own pipeline. The
+  # runtime keeps m independent in-flight batches (m <= pipeline depth),
+  # bounded by aggregate KV-cache capacity (Sec. V-A, batch semantics).
+
+capacity:
+  usable_fraction: 0.90        # vLLM-style memory utilization cap
+
+scheduler:
+  crossover_ai: 32             # F_PIM / BW_out (Sec. IV-D)
+  broadcast_fanout: 4          # one-to-many bank-to-PE connectivity within a BG
+  # Efficiency of PIM streaming for very small per-expert token counts
+  # (short skinny-GEMM operand chains):
+  small_op_efficiency: {tpe_lt2: 0.5, tpe_lt4: 0.7, else: 1.0}
+
+energy:
+  xpu_busy_w: 180.0            # matrix engine w/o local HBM stacks [ASSUME]
+  xpu_idle_w: 60.0
+  pe_sfu_w_per_device: 10.0
+  static_w: 150.0              # host + switch + misc
+  background_w_per_gb: 0.08    # LPDDR (Table I), x0.3 idle factor applied in code
+  background_idle_factor: 0.3

@@ -1,0 +1,145 @@
+Add the ProteusTraceReplay frontend for trace_gen/gen_trace.py
+command traces, and an example configuration.
+
+New files only; applies to any Ramulator 2.0 tree.
+---
+diff --git a/src/frontend/impl/proteus_trace_replay.cpp b/src/frontend/impl/proteus_trace_replay.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/frontend/impl/proteus_trace_replay.cpp
+@@ -0,0 +1,97 @@
++#include <fstream>
++#include <sstream>
++#include <string>
++#include <vector>
++
++#include "base/base.h"
++#include "base/request.h"
++#include "frontend/frontend.h"
++
++namespace Ramulator {
++
++// Replays ProteusSim command traces (trace_gen/gen_trace.py format).
++//
++// Trace line format, one command per line, '#' comments:
++//
++//   <cmd> <die> <bg> <bank> <row> <col> [count]
++//
++// with cmd in {ACTAB, PREAB, RDMAC, RDMACB, WRAB, MODE, RD, WR}. RD/WR are
++// host-path requests and enter the controller's normal read/write queues;
++// the PIM commands enter as pim-* request types handled by the LPDDR5X-PIM
++// device model together with the ProteusPIMSched controller plugin.
++class ProteusTraceReplay : public IFrontEnd, public Implementation {
++  RAMULATOR_REGISTER_IMPLEMENTATION(
++      IFrontEnd, ProteusTraceReplay, "ProteusTraceReplay",
++      "Replays ProteusSim PIM command traces.")
++
++ private:
++  struct TraceLine {
++    std::string type;   // request-type name, e.g. "pim-mac"
++    AddrVec_t addr_vec;
++    int count = 1;
++  };
++  std::vector<TraceLine> m_trace;
++  size_t m_curr = 0;
++  size_t m_repeat = 0;
++
++  size_t s_issued = 0;
++  size_t s_stalled = 0;
++
++ public:
++  void init() override {
++    std::string path = param<std::string>("path").required();
++    m_repeat = param<size_t>("repeat").default_val(1);
++    load_trace(path);
++  }
++
++  void tick() override {
++    if (m_curr >= m_trace.size() * m_repeat) return;
++    const TraceLine& line = m_trace[m_curr % m_trace.size()];
++    Request req(line.addr_vec, m_memory_system->m_dram->m_requests(line.type));
++    if (m_memory_system->send(req)) {
++      s_issued++;
++      m_curr++;
++    } else {
++      s_stalled++;
++    }
++  }
++
++  bool is_finished() override {
++    return m_curr >= m_trace.size() * m_repeat;
++  }
++
++ private:
++  void load_trace(const std::string& path) {
++    std::ifstream f(path);
++    if (!f) throw ConfigurationError("trace not found: {}", path);
++    std::string line;
++    while (std::getline(f, line)) {
++      size_t hash = line.find('#');
++      if (hash != std::string::npos) line = line.substr(0, hash);
++      std::istringstream ss(line);
++      std::string cmd;
++      if (!(ss >> cmd)) continue;
++      TraceLine t;
++      t.type = translate(cmd);
++      int die = 0, bg = 0, bank = 0, row = 0, col = 0;
++      ss >> die >> bg >> bank >> row >> col >> t.count;
++      // channel 0; die maps to the rank level of the device model
++      t.addr_vec = {0, die, bg, bank, row, col};
++      m_trace.push_back(t);
++    }
++  }
++
++  static std::string translate(const std::string& cmd) {
++    if (cmd == "RDMAC") return "pim-mac";
++    if (cmd == "RDMACB") return "pim-mac-broadcast";
++    if (cmd == "WRAB") return "pim-write";
++    if (cmd == "MODE") return "pim-mode";
++    if (cmd == "RD") return "read";
++    if (cmd == "WR") return "write";
++    if (cmd == "ACTAB" || cmd == "PREAB")
++      return "pim-mac";   // folded into the group's prerequisite chain
++    throw ConfigurationError("unknown trace command: {}", cmd);
++  }
++};
++
++}  // namespace Ramulator
+diff --git a/example_config/proteus-lpddr5x-pim.yaml b/example_config/proteus-lpddr5x-pim.yaml
+new file mode 100644
+--- /dev/null
++++ b/example_config/proteus-lpddr5x-pim.yaml
+@@ -0,0 +1,33 @@
++# Ramulator 2.0 configuration for the LPDDR5X-PIM device model with the
++# Proteus PIM-priority controller plugin, replaying a ProteusSim trace.
++#
++#   ./ramulator2 -f example_config/proteus-lpddr5x-pim.yaml
++Frontend:
++  impl: ProteusTraceReplay
++  path: gemm.trace          # from trace_gen/gen_trace.py
++  repeat: 1
++  clock_ratio: 1
++
++MemorySystem:
++  impl: GenericDRAM
++  clock_ratio: 1
++  DRAM:
++    impl: LPDDR5X-PIM
++    org:
++      preset: LPDDR5X_8Gb_x16
++      channel: 1
++      rank: 4               # dies behind the channel
++    timing:
++      preset: LPDDR5X_8533
++  Controller:
++    impl: Generic
++    Scheduler:
++      impl: FRFCFS
++    RefreshManager:
++      impl: AllBank
++    plugins:
++      - ControllerPlugin:
++          impl: ProteusPIMSched
++          fifo_drain_ck: 16
++  AddrMapper:
++    impl: linear

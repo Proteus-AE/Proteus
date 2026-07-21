@@ -1,0 +1,19 @@
+# Mixtral-8x7B (MoE, GQA)
+name: Mixtral-8x7B
+arch: moe
+attention: gqa
+n_layers: 32
+d_model: 4096
+n_heads: 32
+n_kv_heads: 8            # g = 4
+d_head: 128
+d_ffn: 14336
+weight_bytes: 94.0e+9
+active_params: 13.0e+9
+kv_bytes_per_token: 128.0e+3
+moe:
+  enabled: true
+  n_experts: 8
+  top_k: 2
+  expert_bytes: 352.0e+6      # per expert per layer (3 * d_model * d_ffn * 2 B)
+  dense_bytes: 4.0e+9         # non-expert weights (attention, embeddings, router)

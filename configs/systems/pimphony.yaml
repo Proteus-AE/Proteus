@@ -1,0 +1,25 @@
+# PIMphony baseline (2026): orchestration system for PIM-based long-context
+# inference on AiMX-class devices. Its TCP/kernel-orchestration/DCS techniques
+# are credited as bandwidth-utilization and overlap gains over the NeuPIMs-style
+# execution model (see proteus_sim/baselines/pimphony.py).
+name: PIMphony
+kind: pimphony
+devices: 8
+capacity: 256.0e+9                 # 8 x 32 GB AiMX modules
+aim_internal_per_device: 32.0e+12  # AiMX all-bank internal bandwidth (attention)
+pim_stream_efficiency: 0.80
+pim_util: 0.90                     # TCP channel-utilization recovery
+orchestration_gain: 1.09           # kernel orchestration + DCS overlap gain
+weight_stream_curve: {base: 0.28, log2_slope: 0.077, cap: 0.70}
+xpu_bw_aggregate: 16.0e+12
+overlap_overhead: 1.02
+
+energy:
+  xpu_busy_w: 250.0
+  xpu_idle_w: 80.0
+  pim_pe_w_per_device: 10.0
+  static_w: 150.0
+  hbm_pj_per_bit: 3.9
+  aim_int_pj_per_bit: 2.5
+  background_w_per_gb: 1.5
+  background_idle_factor: 0.3

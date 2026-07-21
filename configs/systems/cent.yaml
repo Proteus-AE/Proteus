@@ -1,0 +1,19 @@
+# CENT baseline (ASPLOS'25): GPU-free system scaling CXL-attached GDDR6-AiM
+# devices. Near-bank GEMV execution: shared-operand GEMMs decompose into
+# per-vector GEMVs (weights re-streamed once per routed token), and GQA/MLA
+# attention re-reads KV once per query group (no inter-PE operand reuse).
+name: CENT
+kind: cent
+devices: 8
+capacity_per_device: 16.0e+9       # native GDDR6-AiM module capacity
+internal_bw_per_device: 16.0e+12   # all-bank aggregate
+stream_efficiency: 0.80
+host_cmd_overhead_ms: 1.0          # host-driven command stream per iteration
+small_op_efficiency: {tpe_lt2: 0.5, tpe_lt4: 0.7, else: 1.0}
+
+energy:
+  device_w: 40.0                   # CXL controller + AiM-chip logic
+  static_w: 150.0
+  gddr_int_pj_per_bit: 3.5
+  background_w_per_gb: 1.2
+  background_idle_factor: 0.3

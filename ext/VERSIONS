@@ -1,0 +1,4 @@
+# Pinned upstream revisions (used by scripts/fetch_deps.sh for plain
+# checkouts; git submodules record the same pins).
+ramulator2 https://github.com/CMU-SAFARI/ramulator2.git 3f244c05cbe64c2455314b1780ba7b42e978858d
+onnxim     https://github.com/PSAL-POSTECH/ONNXim.git    853e9f1a438bb8786a137cf296590376ad34fc58
