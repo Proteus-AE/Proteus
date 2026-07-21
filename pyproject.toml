@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proteus-sim"
+version = "1.0.0"
+description = "Operator-level performance/energy simulator with a command-level LPDDR5X-PIM backend for the Proteus heterogeneous xPU+PIM LLM inference system"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = ["pyyaml>=6.0", "matplotlib>=3.5", "numpy>=1.23"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+integration = ["onnx>=1.14"]   # ONNXim cross-check (ext/onnxim)
+
+[tool.setuptools]
+packages = ["proteus_sim", "proteus_sim.baselines", "proteus_sim.dram",
+            "proteus_sim.compiler", "proteus_sim.xpucore", "trace_gen"]

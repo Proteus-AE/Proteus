@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use ProteusSim, please cite the Proteus paper."
+title: "ProteusSim: simulator for Proteus (scalable and reconfigurable heterogeneous xPU + near-bank-PIM LLM inference)"
+type: software
+authors:
+  - name: "The Proteus authors (anonymized for double-blind review)"
+license: MIT
+version: 1.0.0
+date-released: "2026-07-20"
