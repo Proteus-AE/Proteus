@@ -1,4 +1,4 @@
-# ProteusSim
+# Proteus
 
 Simulation infrastructure for **Proteus**, a heterogeneous xPU +
 near-bank-PIM system for LLM inference, and the six baseline systems
