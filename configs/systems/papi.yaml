@@ -1,33 +1,49 @@
-# PAPI baseline (MICRO'24): heterogeneous system with dedicated Attn-PIM and
-# FC-PIM device pools (original 2:1 ratio) plus xPU processing units.
-# KV caches must reside in the Attn-PIM pool; weights are served from the
-# xPU-side memory (V-A capacity accounting).
+# PAPI baseline (ASPLOS'25): heterogeneous system with dedicated Attn-PIM and
+# FC-PIM device pools plus xPU processing units. The work partitions its HBM
+# devices 60/30 between attention and FC, which is the 2:1 ratio preserved
+# here; KV caches are resident in the Attn-PIM pool only (V-A capacity
+# accounting). Attn-PIM places one FPU per two banks and FC-PIM four FPUs
+# per bank, so the two pools share a bank read rate but not a compute
+# density.
 name: PAPI
 kind: papi
 devices: 8
 hbm_capacity: 256.0e+9
 usable_fraction: 0.90
 attn_pool_fraction: 0.6667         # 2/3 of devices host Attn-PIM
-attn_allbank_mult: 9.0             # all-bank internal bandwidth multiplier
-# Sustained Attn-PIM streaming efficiency per attention type: MLA's short
-# latent-KV rows amortize row activations poorly compared to GQA/MHA rows.
-attention_eff: {gqa: 0.70, mha: 0.70, mla: 0.40}
-fc_pim_allbank_mult: 9.0           # logic-die FC-PIM on the FC pool
-fc_pim_efficiency: 0.95
-# FC-PIM is GEMV-grade: it wins for small (xPU-fragmenting) experts; larger
-# skinny-GEMM operands run on the xPU.
-fc_pim_expert_bytes_max: 64.0e+6
+# All-bank internal bandwidth of an HBM-PIM stack relative to its external
+# interface, 4.92/1.23 TB/s [Aquabolt-XL, Hot Chips 33]. Both pools read
+# their banks at the same rate; they differ in FPU density, not bandwidth.
+attn_allbank_mult: 4.0
+# FC-PIM places four FPUs per bank against Attn-PIM's one per two banks, so
+# its logic die sustains eight times the per-bank operand rate.
+fc_pim_allbank_mult: 8.0
+attention_eff: 0.70                # all-bank KV streaming efficiency [ASSUME]
+fc_pim_efficiency: 0.95            # GEMV-grade FC-PIM path [ASSUME]
 xpu_bw_aggregate: 16.0e+12
+# Sec. V-A: heterogeneous systems match Proteus's aggregate xPU throughput.
+xpu_flops_aggregate: 2496.0e+12    # 8 x 312 TFLOPS
 weight_eff: {base: 0.40, span: 0.35, saturate_tpe: 32}   # xPU GEMM path
-overlap_overhead: 1.10
-launch_overhead_ms: 0.3
+overlap_overhead: 1.02             # Attn/FC pipelining overhead [ASSUME]
 
 energy:
   xpu_busy_w: 250.0
   xpu_idle_w: 80.0
   pim_pe_w_per_device: 10.0
   static_w: 150.0
-  hbm_pj_per_bit: 3.9
-  hbm_pim_int_pj_per_bit: 2.5
+  hbm_pj_per_bit: 3.9          # HBM external access energy
+  # The busy/idle figures above are accelerator-die power; the HBM stacks
+  # draw their own background power, charged per unit of resident capacity.
   background_w_per_gb: 1.5
   background_idle_factor: 0.3
+  hbm_pim_int_pj_per_bit: 2.5
+
+# Tensor-parallel collectives. Every evaluated system distributes each layer
+# over its eight devices and therefore pays two ring AllReduces per
+# transformer block; the cost is charged from the device's own interconnect.
+# NVLink-class accelerator fabric [ASSUME]
+interconnect:
+  kind: nvlink-class
+  link_bytes_per_s_per_dir: 300.0e+9
+  end_to_end_latency_ns: 700
+tp_collectives_per_layer: 2

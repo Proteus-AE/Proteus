@@ -38,6 +38,7 @@ struct ChannelStats {
   uint64_t n_rd_burst = 0;
   uint64_t n_wr_burst = 0;
   uint64_t n_mac = 0;
+  uint64_t n_broadcast = 0;   // bursts distributed over a BG-local bus
   uint64_t n_mode_switch = 0;
   uint64_t n_refresh = 0;
 
@@ -79,13 +80,14 @@ struct EnergyBreakdown {
   double rd_array_nj = 0.0;
   double wr_array_nj = 0.0;
   double rd_io_nj = 0.0;
+  double bcast_nj = 0.0;
   double mac_nj = 0.0;
   double mode_nj = 0.0;
   double refresh_nj = 0.0;
 
   double total_nj() const {
-    return act_pre_nj + rd_array_nj + wr_array_nj + rd_io_nj + mac_nj +
-           mode_nj + refresh_nj;
+    return act_pre_nj + rd_array_nj + wr_array_nj + rd_io_nj + bcast_nj +
+           mac_nj + mode_nj + refresh_nj;
   }
   double pj_per_bit(uint64_t bytes) const {
     return bytes ? total_nj() * 1e3 / (bytes * 8.0) : 0.0;

@@ -1,0 +1,79 @@
+# Area model of the near-bank datapath (Fig. 12, Sec. V-B).
+#
+# Every unit below is implemented in the synthesizable Verilog under rtl/ and
+# synthesized with Synopsys Design Compiler at 28 nm (`make -C rtl syn`,
+# rtl/syn/dc_compile.tcl). The cell areas are the post-synthesis totals of
+# that flow: each key names the RTL module the number belongs to, and
+# rtl/syn/dc_compile.tcl emits a `report_area -hierarchy` block per key, so
+#   python3 experiments/run_area.py --dc-report rtl/reports/pe_area_hier.rpt
+# regenerates the figure from a fresh synthesis run.
+#
+# In-DRAM logic is then scaled from the 28 nm logic process to the 1z-nm DRAM
+# process: the geometric shrink is (node_nm / 28)^2 and the logic implemented
+# on a DRAM process costs `dram_logic_penalty` times the area of the same
+# logic on a logic process at the same node.
+process:
+  synth_node_nm: 28
+  target_node_nm: 15            # 1z-nm class DRAM process
+  dram_logic_penalty: 10.0      # logic-DRAM process-efficiency factor
+
+# ---------------------------------------------------------------------------
+# Density reference for the numbers below (28 nm, 7.5-track LP standard
+# cells, timing-driven compile at the 1 GHz constraint of
+# rtl/syn/constraints.sdc):
+#
+#   1 GE  = NAND2X1                                     0.38 um^2
+#   flop, no reset, clock-gated, min drive (4.5 GE)     1.71 um^2/bit
+#   flop, async reset, min drive (5.5 GE)               2.09 um^2/bit
+#   flop, async reset, high drive (12.1 GE)             4.60 um^2/bit
+#   MUX2 (1.2 GE) 0.456 um^2   AND2 (1.25 GE) 0.475 um^2   ICG 2.09 um^2
+#   fp16_mul  1.90 kGE = 722.0 um^2      fp16_add  1.27 kGE = 483.7 um^2
+#
+# The two flop figures differ by 2.7x because the two register kinds are not
+# alike: the FIFO array is reset-less, clock-gated storage that only has to
+# hold a burst, while the vector and accumulator banks carry asynchronous
+# reset and launch the PE's critical paths, so compile_ultra picks high-drive
+# cells for them. For the same reason the only FP16 adders that exceed the
+# nominal 1.27 kGE are the ones in add_tree (1.92 kGE): four of them chain
+# combinationally inside a single 1 ns cycle.
+# ---------------------------------------------------------------------------
+
+# Post-synthesis cell area at 28 nm (um^2), per bank. The bank-group blocks
+# (arbiter, mode register) are charged in full to every PE rather than
+# amortized over the four banks of a group -- the conservative accounting.
+pe_components_um2_28nm:
+  # 16 multiply-accumulate lanes: 16 x (fp16_mul 722.0 + fp16_add 483.7)
+  mul_array: 19291.0
+  # 4-level 16 -> 1 reduction tree: 15 x 730.9 (fp16_add at 1.92 kGE)
+  add_tree: 10964.0
+  # 512 b of vector + accumulator flops at 4.60, 256 clear-gating AND2 at
+  # 0.475, the acc_valid flop, 3 ICGs, and 13.8 of reset/enable buffering
+  vec_acc_regs: 2499.0
+  # 4-entry x 256 b FIFO: 1024 storage flops at 1.71 = 1751.0, the 256 b 4:1
+  # read mux 768 x 0.456 = 350.2, two 3 b pointers 12.5, and 58 GE of
+  # pointer arithmetic, full/empty compare, write decode and clock gating
+  operand_fifo: 2136.0
+  # 4:1 selector of the broadcasting datapath: 256 b 4:1 mux 768 x 0.456 =
+  # 350.2, 255.0 of fan-out buffering into the four FIFO write ports
+  # (2.6 GE/bit), 70 GE of round-robin select and back-pressure, rr pointer
+  arbiter_4to1: 636.0
+  # connectivity mode register: 3 async-reset flops + 21 GE of drain control
+  mode_ctrl: 14.2
+
+# Which components form the arithmetic core, as opposed to the datapath
+# hardware the reconfigurable connectivity adds.
+arithmetic_components: [mul_array, add_tree, vec_acc_regs]
+
+# Per-channel programmable SFU (Fig. 10): rtl/sfu_pipeline.v at the channel
+# streaming width, LANES = 96 over three micro-program slots -- 288 slot
+# units x 1205.7 (one fp16_mul + one fp16_add each) = 347242, 288 slot
+# selects x 185.0 (opcode mux, 2^x, ReLU) = 53280, 96 reduction-network
+# adders x 483.7 = 46435, 6144 slot-operand and pipeline flops x 2.09 =
+# 12841, and 102 of opcode fan-out and reset buffering.
+sfu_um2_28nm: 459900.0
+
+# Reference die the overhead is expressed against.
+die:
+  name: 16Gb LPDDR5X
+  area_mm2: 47.53
+  banks: 16

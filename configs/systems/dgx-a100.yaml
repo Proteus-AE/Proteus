@@ -1,24 +1,40 @@
-# GPU baseline: 8x A100 DGX served by vLLM (continuous batching + PagedAttention)
+# GPU baseline: 8x A100 DGX served by vLLM (continuous batching +
+# PagedAttention). Device values are the A100 80GB SXM datasheet figures
+# [NVIDIA A100 datasheet]: 312 TFLOPS FP16 tensor core (dense), 2039 GB/s
+# HBM2e, 80 GB, 600 GB/s bidirectional NVLink 3.0 (300 GB/s per direction).
 name: DGX-A100
 kind: gpu
 devices: 8
 hbm_capacity: 640.0e+9
-hbm_bw_aggregate: 16.0e+12
+hbm_bw_aggregate: 16.312e+12   # 8 x 2039 GB/s (datasheet)
 usable_fraction: 0.90
-flops_fp16_aggregate: 2496.0e+12    # 8 x 312 TFLOPS
+flops_fp16_aggregate: 2496.0e+12    # 8 x 312 TFLOPS (datasheet)
 
 efficiency:
-  weight_stream: 0.75          # sustained GEMM weight-streaming efficiency
-  attention: 0.60              # paged-attention kernel efficiency
+  # Sustained memory-bandwidth utilization of the decode GEMMs. End to end
+  # this model lands at 58-60% MBU, inside the ~55-60% band measured for
+  # 70B-class decode on A100/H100 [Databricks, "LLM Inference Performance
+  # Engineering"].
+  weight_stream: 0.62
+  attention: 0.60             # paged-attention kernel efficiency [ASSUME]
   # MoE expert fragmentation: effective streaming efficiency degrades when
   # few tokens are routed per expert (kernel launch + tile underutilization).
   moe_frag: {base: 0.40, span: 0.35, saturate_tpe: 32}
-  allreduce_overhead: 0.08     # tensor-parallel collectives per iteration
-  launch_overhead_ms: 0.3
 
 energy:
+  # Board power during memory-bound decode, well below the 400 W SXM TDP
+  # [NVIDIA A100 datasheet]; charging the full TDP would widen the reported
+  # energy gap, so this is the conservative choice. [ASSUME]
   gpu_busy_w: 250.0
   static_w: 150.0
-  hbm_pj_per_bit: 3.9
-  background_w_per_gb: 1.5
-  background_idle_factor: 0.3
+  hbm_pj_per_bit: 3.9          # HBM2e access energy at the die interface
+
+# Tensor-parallel collectives. Every evaluated system distributes each layer
+# over its eight devices and therefore pays two ring AllReduces per
+# transformer block; the cost is charged from the device's own interconnect.
+# 8-way NVLink 3.0 (300 GB/s per direction and GPU)
+interconnect:
+  kind: nvlink3
+  link_bytes_per_s_per_dir: 300.0e+9
+  end_to_end_latency_ns: 700
+tp_collectives_per_layer: 2

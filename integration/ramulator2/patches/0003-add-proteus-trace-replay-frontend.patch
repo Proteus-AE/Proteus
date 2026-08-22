@@ -1,5 +1,5 @@
-Add the ProteusTraceReplay frontend for trace_gen/gen_trace.py
-command traces, and an example configuration.
+Add the ProteusTraceReplay frontend for the command traces of
+trace_gen/gen_trace.py, and an example configuration.
 
 New files only; applies to any Ramulator 2.0 tree.
 ---
@@ -7,7 +7,7 @@ diff --git a/src/frontend/impl/proteus_trace_replay.cpp b/src/frontend/impl/prot
 new file mode 100644
 --- /dev/null
 +++ b/src/frontend/impl/proteus_trace_replay.cpp
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,205 @@
 +#include <fstream>
 +#include <sstream>
 +#include <string>
@@ -19,16 +19,36 @@ new file mode 100644
 +
 +namespace Ramulator {
 +
-+// Replays ProteusSim command traces (trace_gen/gen_trace.py format).
++// Replays ProteusSim command traces -- the format written by
++// proteus_sim/dram/trace.py and produced by trace_gen/gen_trace.py. One
++// command per line; blank lines and lines whose first token starts with '#'
++// are skipped:
 +//
-+// Trace line format, one command per line, '#' comments:
++//   MODE     <direct|broadcast>   per-channel connectivity mode register
++//   ACT_AB   <row>                all-bank row activate
++//   RDMAC_AB <row> <col>          all-bank 32 B column read into the PEs
++//   WR_AB    <row> <col>          all-bank 32 B column write (KV append)
++//   PRE_AB                        all-bank precharge
++//   ACT      <row> <col> <bank>   host (xPU) single-bank commands
++//   RD       <row> <col> <bank>
++//   PRE      <row> <col> <bank>
++//   BARRIER                       trace-level synchronization marker
 +//
-+//   <cmd> <die> <bg> <bank> <row> <col> [count]
++// Only the column commands carry a request. Row control belongs to the
++// device model, whose prerequisite chain issues ACTab/PREab (and ACT/PRE for
++// host requests) by itself, so ACT_AB / PRE_AB / ACT / PRE lines are
++// consumed as row bookkeeping and emit nothing. RDMAC_AB becomes pim-mac or
++// pim-mac-broadcast according to the mode register the preceding MODE line
++// set. BARRIER is an ordering marker: this frontend issues strictly in order
++// and only advances once the memory system has accepted a request, so
++// nothing crosses it -- the same treatment the reference backend gives it
++// (proteus_sim/dram/channel.py).
 +//
-+// with cmd in {ACTAB, PREAB, RDMAC, RDMACB, WRAB, MODE, RD, WR}. RD/WR are
-+// host-path requests and enter the controller's normal read/write queues;
-+// the PIM commands enter as pim-* request types handled by the LPDDR5X-PIM
-+// device model together with the ProteusPIMSched controller plugin.
++// All-bank commands are executed by every bank of one channel-local die, so
++// they are addressed to bank group 0 / bank 0 of the `die` rank; the device
++// model widens them to the rank. Host commands carry a channel-global bank
++// id, split into bank group and bank with `bankgroups` / `banks_per_group`,
++// which must match the DRAM organization preset.
 +class ProteusTraceReplay : public IFrontEnd, public Implementation {
 +  RAMULATOR_REGISTER_IMPLEMENTATION(
 +      IFrontEnd, ProteusTraceReplay, "ProteusTraceReplay",
@@ -36,28 +56,46 @@ new file mode 100644
 +
 + private:
 +  struct TraceLine {
-+    std::string type;   // request-type name, e.g. "pim-mac"
++    std::string type;   // request-type name; empty = bookkeeping only
 +    AddrVec_t addr_vec;
-+    int count = 1;
 +  };
++
++  std::string m_path;
 +  std::vector<TraceLine> m_trace;
 +  size_t m_curr = 0;
-+  size_t m_repeat = 0;
++  size_t m_repeat = 1;
++
++  int m_die = 0;             // rank the channel's PIM die sits on
++  int m_bankgroups = 4;
++  int m_banks_per_group = 4;
 +
 +  size_t s_issued = 0;
 +  size_t s_stalled = 0;
++  size_t s_barriers = 0;
 +
 + public:
 +  void init() override {
-+    std::string path = param<std::string>("path").required();
++    m_path = param<std::string>("path").required();
 +    m_repeat = param<size_t>("repeat").default_val(1);
-+    load_trace(path);
++    m_die = param<int>("die").default_val(0);
++    m_bankgroups = param<int>("bankgroups").default_val(4);
++    m_banks_per_group = param<int>("banks_per_group").default_val(4);
++    if (m_repeat == 0)
++      throw ConfigurationError("repeat must be at least 1");
++    load_trace();
++    register_stat(s_issued).name("proteus_trace_requests_issued");
++    register_stat(s_stalled).name("proteus_trace_issue_stalls");
++    register_stat(s_barriers).name("proteus_trace_barriers");
 +  }
 +
 +  void tick() override {
-+    if (m_curr >= m_trace.size() * m_repeat) return;
++    size_t total = m_trace.size() * m_repeat;
++    while (m_curr < total && m_trace[m_curr % m_trace.size()].type.empty())
++      m_curr++;
++    if (m_curr >= total) return;
 +    const TraceLine& line = m_trace[m_curr % m_trace.size()];
-+    Request req(line.addr_vec, m_memory_system->m_dram->m_requests(line.type));
++    Request req(line.addr_vec,
++                m_memory_system->m_dram->m_requests(line.type));
 +    if (m_memory_system->send(req)) {
 +      s_issued++;
 +      m_curr++;
@@ -71,36 +109,106 @@ new file mode 100644
 +  }
 +
 + private:
-+  void load_trace(const std::string& path) {
-+    std::ifstream f(path);
-+    if (!f) throw ConfigurationError("trace not found: {}", path);
-+    std::string line;
-+    while (std::getline(f, line)) {
-+      size_t hash = line.find('#');
-+      if (hash != std::string::npos) line = line.substr(0, hash);
-+      std::istringstream ss(line);
-+      std::string cmd;
-+      if (!(ss >> cmd)) continue;
-+      TraceLine t;
-+      t.type = translate(cmd);
-+      int die = 0, bg = 0, bank = 0, row = 0, col = 0;
-+      ss >> die >> bg >> bank >> row >> col >> t.count;
-+      // channel 0; die maps to the rank level of the device model
-+      t.addr_vec = {0, die, bg, bank, row, col};
-+      m_trace.push_back(t);
-+    }
++  // ---- trace parsing ------------------------------------------------ //
++  [[noreturn]] void bad(int lineno, const std::string& what) const {
++    throw ConfigurationError("{}:{}: {}", m_path, lineno, what);
 +  }
 +
-+  static std::string translate(const std::string& cmd) {
-+    if (cmd == "RDMAC") return "pim-mac";
-+    if (cmd == "RDMACB") return "pim-mac-broadcast";
-+    if (cmd == "WRAB") return "pim-write";
-+    if (cmd == "MODE") return "pim-mode";
-+    if (cmd == "RD") return "read";
-+    if (cmd == "WR") return "write";
-+    if (cmd == "ACTAB" || cmd == "PREAB")
-+      return "pim-mac";   // folded into the group's prerequisite chain
-+    throw ConfigurationError("unknown trace command: {}", cmd);
++  // Reads exactly `n` non-negative integers and nothing else.
++  std::vector<int> operands(std::istringstream& ss, int n,
++                            const std::string& cmd, int lineno) const {
++    std::vector<int> v;
++    for (int i = 0; i < n; i++) {
++      long long x;
++      if (!(ss >> x))
++        bad(lineno, fmt::format("{} takes {} operand(s), got {}", cmd, n, i));
++      if (x < 0)
++        bad(lineno, fmt::format("{}: negative operand {}", cmd, x));
++      v.push_back(static_cast<int>(x));
++    }
++    std::string extra;
++    if (ss >> extra)
++      bad(lineno, n == 0
++          ? fmt::format("{} takes no operands, found '{}'", cmd, extra)
++          : fmt::format("{} takes {} operand(s), found '{}' after them",
++                        cmd, n, extra));
++    return v;
++  }
++
++  AddrVec_t all_bank(int row, int col) const {
++    return {0, m_die, 0, 0, row, col};
++  }
++
++  AddrVec_t single_bank(int row, int col, int bank, int lineno) const {
++    if (bank >= m_bankgroups * m_banks_per_group)
++      bad(lineno, fmt::format("bank {} outside the {} banks of a channel",
++                              bank, m_bankgroups * m_banks_per_group));
++    return {0, m_die, bank / m_banks_per_group, bank % m_banks_per_group,
++            row, col};
++  }
++
++  void load_trace() {
++    std::ifstream f(m_path);
++    if (!f) throw ConfigurationError("trace not found: {}", m_path);
++
++    bool broadcast = false;   // mode register state while replaying
++    std::string line;
++    int lineno = 0;
++    while (std::getline(f, line)) {
++      lineno++;
++      std::istringstream ss(line);
++      std::string cmd;
++      if (!(ss >> cmd)) continue;             // blank line
++      if (cmd[0] == '#') continue;            // comment line
++
++      TraceLine t;
++      if (cmd == "MODE") {
++        std::string mode;
++        if (!(ss >> mode))
++          bad(lineno, "MODE takes 'direct' or 'broadcast'");
++        if (mode != "direct" && mode != "broadcast")
++          bad(lineno, fmt::format("MODE takes 'direct' or 'broadcast', got "
++                                  "'{}'", mode));
++        std::string extra;
++        if (ss >> extra)
++          bad(lineno, fmt::format("MODE takes one operand, found '{}' after "
++                                  "it", extra));
++        broadcast = (mode == "broadcast");
++        t.type = "pim-mode";
++        t.addr_vec = all_bank(0, 0);
++      } else if (cmd == "ACT_AB") {
++        auto o = operands(ss, 1, cmd, lineno);
++        t.addr_vec = all_bank(o[0], 0);       // row bookkeeping only
++      } else if (cmd == "RDMAC_AB") {
++        auto o = operands(ss, 2, cmd, lineno);
++        t.type = broadcast ? "pim-mac-broadcast" : "pim-mac";
++        t.addr_vec = all_bank(o[0], o[1]);
++      } else if (cmd == "WR_AB") {
++        auto o = operands(ss, 2, cmd, lineno);
++        t.type = "pim-write";
++        t.addr_vec = all_bank(o[0], o[1]);
++      } else if (cmd == "PRE_AB") {
++        operands(ss, 0, cmd, lineno);
++        t.addr_vec = all_bank(0, 0);          // row bookkeeping only
++      } else if (cmd == "RD") {
++        auto o = operands(ss, 3, cmd, lineno);
++        t.type = "read";
++        t.addr_vec = single_bank(o[0], o[1], o[2], lineno);
++      } else if (cmd == "ACT" || cmd == "PRE") {
++        auto o = operands(ss, 3, cmd, lineno);
++        t.addr_vec = single_bank(o[0], o[1], o[2], lineno);
++      } else if (cmd == "BARRIER") {
++        operands(ss, 0, cmd, lineno);
++        s_barriers++;
++      } else {
++        bad(lineno, fmt::format("unknown command '{}'; the ProteusSim trace "
++                                "grammar is MODE, ACT_AB, RDMAC_AB, WR_AB, "
++                                "PRE_AB, ACT, RD, PRE, BARRIER", cmd));
++      }
++      m_trace.push_back(t);
++    }
++    if (m_trace.empty())
++      throw ConfigurationError("{}: no commands in trace", m_path);
 +  }
 +};
 +
@@ -109,15 +217,20 @@ diff --git a/example_config/proteus-lpddr5x-pim.yaml b/example_config/proteus-lp
 new file mode 100644
 --- /dev/null
 +++ b/example_config/proteus-lpddr5x-pim.yaml
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,38 @@
 +# Ramulator 2.0 configuration for the LPDDR5X-PIM device model with the
-+# Proteus PIM-priority controller plugin, replaying a ProteusSim trace.
++# Proteus PIM-priority controller plugin, replaying a ProteusSim trace:
 +#
++#   python3 trace_gen/gen_trace.py --kernel skinny-gemm --rows 64 \
++#       --vectors 8 --mode broadcast -o gemm.trace
 +#   ./ramulator2 -f example_config/proteus-lpddr5x-pim.yaml
 +Frontend:
 +  impl: ProteusTraceReplay
-+  path: gemm.trace          # from trace_gen/gen_trace.py
++  path: gemm.trace          # trace_gen/gen_trace.py output
 +  repeat: 1
++  die: 0                    # rank the channel's PIM die sits on
++  bankgroups: 4             # must match DRAM.org below: a channel is one
++  banks_per_group: 4        # die of 4 bank groups x 4 banks (16 banks)
 +  clock_ratio: 1
 +
 +MemorySystem:
@@ -126,9 +239,9 @@ new file mode 100644
 +  DRAM:
 +    impl: LPDDR5X-PIM
 +    org:
-+      preset: LPDDR5X_8Gb_x16
++      preset: LPDDR5X_16Gb_x16
 +      channel: 1
-+      rank: 4               # dies behind the channel
++      rank: 1               # one PIM die behind the x16 channel
 +    timing:
 +      preset: LPDDR5X_8533
 +  Controller:

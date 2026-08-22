@@ -1,36 +1,72 @@
-# LPDDR5X-8533 PIM substrate timing/organization (Table "System configuration",
-# Sec. V-A).  The effective-rate derivation lives in proteus_sim/memory.py.
+# LPDDR5X-8533 near-bank PIM substrate (Table III, Sec. V-A).
+#
+# Device organization (Sec. V-A):
+#   1 device  = 8 packages
+#   1 package = 8 x16 PIM channels                       -> 32 GB / package
+#   1 channel = one 32Gb die = 4 bank groups x 4 banks    -> 16 banks, 4 GB
+#   1 bank    = one 16-lane FP16 MAC PE + 4-entry (128 B) operand FIFO
+# giving 64 channels, 256 bank groups, 1024 banks and 256 GB per device.
+#
+# The closed-form sustained rates derived from this table live in
+# proteus_sim/memory.py; they are cross-validated command by command against
+# the event-driven backend (proteus_sim/dram/, pimcore/) by
+# experiments/run_microbench.py -- see docs/dram-model.md.
 name: LPDDR5X-8533
 data_rate_mtps: 8533           # MT/s per pin
 io_width: 16                   # x16 channel, self-contained in one die
-burst_length: 16               # BL16 -> 32 B per burst, matches 16-lane FP16 PE
+burst_length: 16               # BL16 -> 32 B per burst, matches the 16-lane FP16 PE
 packages_per_device: 8
 channels_per_package: 8
-dies_per_channel: 4
+dies_per_channel: 1            # one 32Gb die per x16 channel (Sec. V-A)
 bankgroups_per_die: 4
 banks_per_bankgroup: 4
-capacity_per_package_gb: 64
+capacity_per_package_gb: 32    # 8 channels x 4 GB (Table III)
 
 # DRAM core timing (ns) -- JEDEC LPDDR5X-class values.
-# The command-level backend (proteus_sim/dram/) consumes the full table below;
-# the analytical layer (proteus_sim/memory.py) uses the derived sustained rates
-# and is cross-validated against the backend by experiments/run_microbench.py.
 tCK_wck_ns: 0.234              # WCK at 4266 MHz (8533 MT/s DDR)
 tRCD_ns: 18.0
 tRP_ns: 21.0
 tRAS_ns: 42.0
 tRC_ns: 63.0
-tCCD_L_ns: 4.0                 # same-BG column-to-column delay (drives BG bus cadence)
+tCCD_L_ns: 4.0                 # same-BG column-to-column delay (shared BG bus)
 tCCD_S_ns: 2.0                 # different-BG column-to-column delay
 tRRD_L_ns: 7.5                 # same-BG ACT-to-ACT
 tRRD_S_ns: 3.75                # different-BG ACT-to-ACT
-tFAW_ns: 20.0                  # four-ACT window per die
+tFAW_ns: 20.0                  # four-ACT window per die (single-bank ACTs only)
 tWR_ns: 34.0
 tRTP_ns: 7.5
 tREFI_ns: 3906.0               # all-bank refresh interval
-tRFCab_ns: 280.0               # all-bank refresh cycle time
+tRFCab_ns: 380.0               # all-bank refresh cycle time (>=24Gb density)
 row_bytes: 2048                # per-bank row buffer
-refresh_overhead: 0.965        # tREFI/tRFC-derived availability (analytical layer)
+tWTR_ns: 10.0                  # write-to-read turnaround within a bank
+
+# Near-bank column cycle.
+#
+# tCCD_L bounds column commands whose data leaves the bank group: it covers
+# the bank-group I/O gating and the DQ serializer that turn a column access
+# into a burst on the external bus. A near-bank read never enters that path
+# -- the sense-amplifier output is captured by the bank's own PE over local
+# datalines -- so its column-to-column cycle is set by the bank core alone.
+# We take it as half the same-bank-group value of this device, matching the
+# per-bank column rate reported for commercial near-bank PIM parts, and hold
+# host reads of the same bank to the full tCCD_L (they do traverse the BG
+# I/O). This single parameter fixes the 16TB/s aggregate internal bandwidth
+# of Table III: 1024 banks x 32 B / 2 ns.
+tCCD_PIM_ns: 2.0
+
+# All-bank PIM command constraints.
+#
+# A single all-bank command (ACT_AB / RDMAC_AB / PRE_AB) is broadcast on the
+# command/address bus and executed by every bank of the channel. Unlike a
+# sequence of per-bank ACTs it is provisioned as one operation by the device,
+# so it is not subject to tRRD/tFAW -- those bound the controller's ability to
+# stagger *independent* row activations, which all-bank execution does not do.
+# This follows the all-bank command model of commercial near-bank PIM parts.
+allbank:
+  act_rcd_ns: 18.0             # ACT_AB -> first RDMAC_AB
+  ras_ns: 42.0                 # ACT_AB -> PRE_AB
+  rp_ns: 21.0                  # PRE_AB -> next ACT_AB
+  faw_exempt: true
 
 # Per-command energy for the command-level power counters
 # (DRAMPower-style accounting; values follow Micron LPDDR5X current profiles
@@ -40,26 +76,23 @@ command_energy_pj:
   rd_burst_array: 450.0        # 32 B array read, terminated at the bank-local PE
   wr_burst_array: 480.0        # 32 B array write (in-place KV append path)
   rd_burst_io: 700.0           # additional I/O+PHY when leaving the die (external)
+  bg_broadcast: 35.0           # BG-local distribution of one burst to fanout PEs
   mac_op: 18.0                 # one 16-lane FP16 MAC issue (synthesis-derived)
   mode_switch: 40.0            # per-channel mode-register update
   refresh_ab: 28000.0          # all-bank refresh event (per die)
 
-# Near-bank PE (AiM-style, Sec. V-A)
-pe_lanes: 16                   # FP16 MAC lanes
+# Near-bank PE (AiM-style, Sec. V-A / Fig. 8(c))
+pe_lanes: 16                   # FP16 MAC lanes -> 32 B of matrix operand per issue
 pe_freq_ghz: 1.0
-pe_operand_fifo: 4             # entries; matches BG fan-in (broadcast depth)
+pe_operand_fifo: 4             # entries (128 B); matches the BG broadcast fan-out
 pe_pipeline_eff: 0.90          # issue/drain overhead of the MAC pipeline
+broadcast_fanout: 4            # PEs sharing one bank readout inside a bank group
 
-# Datasheet-nominal sustained aggregates (Sec. V-A); the derived
-# micro-architectural peaks (memory.py) are capped at these values.
+# Datasheet-nominal aggregates quoted in Table III. The derivation below is
+# exact for this organization (16.384 TB/s / 32.768 TFLOPS); these fields are
+# the declared caps the derivation is checked against.
 nominal_internal_bw_tbps: 16.0
 nominal_pe_tflops: 32.0
-
-# All-bank command stream efficiency: fraction of BG-bus cycles that carry
-# operand bursts after row activation, refresh, and command-issue overheads.
-# Derived in memory.py from tRCD/tRP/row_bytes; this field is the cap used
-# when the derivation is not applicable (e.g. irregular access).
-stream_efficiency: 0.80
 
 # Short-payload effect: with small hidden dimensions (d_model <= threshold)
 # per-command column bursts are short and the command/row-activation overhead
@@ -68,11 +101,18 @@ stream_efficiency: 0.80
 short_payload:
   d_model_threshold: 1024
   system_efficiency: 0.65      # end-to-end derate applied uniformly to all systems
-  pim_cmd_efficiency: 0.85     # additional PIM command-issue derate (Proteus)
+  pim_cmd_efficiency: 1.00     # the uniform derate already covers the PIM path
 
-# External interface
+# External interface (Table III: 1 TB/s per device).
+#
+# Unlike the all-bank internal path, the external path is free to interleave
+# across the 16 banks of a channel: 1 TB/s over 64 channels is one 32 B burst
+# per 2.05 ns per channel, which a single bank can already supply, so row
+# activation is hidden behind other banks and never appears in the sustained
+# rate. What remains is all-bank refresh (derived from tRFCab/tREFI) and the
+# bus overhead below (command/address gaps and read/write turnaround).
 external_bw_per_device_tbps: 1.0
-ext_stream_efficiency: 0.85
+ext_bus_efficiency: 0.98
 energy_pj_per_bit:
   external: 4.5                # through LPDDR I/O + PHY
   near_bank: 2.2               # terminates at bank-local PE (no I/O/PHY)

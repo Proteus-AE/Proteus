@@ -1,16 +1,24 @@
-# CXL-PNM baseline (HPCA'24): LPDDR-based CXL expander with channel-level PNM.
-# Conservatively strengthened with a controller-side 16 TFLOPS matrix engine per
-# device (CMM-Ax-class) so that it is never trivially compute-bound; see
-# the header comment of proteus_sim/baselines/cxl_pnm.py.
+# CXL-PNM baseline (HPCA'24): LPDDR5X-based CXL expander with channel-level
+# near-memory processing. Capacity, bandwidth and appliance size are the
+# values the work reports: 512 GB and 1.1 TB/s per device, eight devices per
+# appliance. Operands are visible only at the channel interface, so there is
+# no bank-level reuse to exploit -- this is the "coarse-grained" point of
+# Sec. II-B, and it is why the system is channel-bandwidth-limited here.
 name: CXL-PNM
 kind: cxl_pnm
 devices: 8
 capacity_per_device: 512.0e+9      # 4 TB total (LPDDR)
-bw_per_device: 1.0e+12             # channel-level PNM: external-class bandwidth
+usable_fraction: 0.90
+bw_per_device: 1.1e+12             # 1.1 TB/s per device (reported)
 stream_efficiency: 0.80
-flops_per_device: 16.0e+12         # strengthened controller engine [ASSUME]
+# The work does not publish the throughput of its PNM engine, so this is the
+# one unsourced value in this file and it is chosen in the baseline's favour:
+# 32 TFLOPS per device is twice the per-device arithmetic throughput of the
+# near-bank GDDR6-AiM devices of the CENT baseline, and it keeps the engine
+# off the critical path throughout the evaluated batch range, so the system
+# is limited by its channel bandwidth rather than by an assumption. [ASSUME]
+flops_per_device: 32.0e+12
 compute_efficiency: 0.80
-launch_overhead_ms: 0.3
 
 energy:
   controller_w_per_device: 20.0
@@ -19,3 +27,13 @@ energy:
   lpddr_ext_pj_per_bit: 4.5
   background_w_per_gb: 0.08
   background_idle_factor: 0.3
+
+# Tensor-parallel collectives. Every evaluated system distributes each layer
+# over its eight devices and therefore pays two ring AllReduces per
+# transformer block; the cost is charged from the device's own interconnect.
+# CXL 3.0 x16, as reported by the work
+interconnect:
+  kind: cxl3-switch
+  link_bytes_per_s_per_dir: 128.0e+9
+  end_to_end_latency_ns: 165
+tp_collectives_per_layer: 2

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Memory-substrate comparison at command level (Table "DRAM technologies",
-Sec. IV-B), executed on the PimCore C++ backend.
+"""Memory-substrate comparison at command level (Table II, Sec. IV-B),
+executed on the PimCore C++ backend.
 
 Runs the identical reuse-free GEMV streaming kernel on the three candidate
 near-bank substrates -- LPDDR5X-PIM, HBM-PIM, GDDR6-AiM -- and reports the
@@ -23,11 +23,6 @@ ROWS = 96
 
 
 def main():
-    if not pc.available():
-        print("cmake/g++ unavailable; skipping the C++ substrate study")
-        return
-    print("building PimCore (C++) ...")
-    pc.build()
     print(pc.run_tests().strip())
 
     rows = [["substrate", "channel_gbps", "efficiency", "device_tbps",

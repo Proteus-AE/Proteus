@@ -23,7 +23,7 @@ incremental variants, device scaling, [PP, DP] hybrids) and the six baseline
 systems, consuming the repository's `configs/` YAML files directly. It is an
 independent implementation of the Python system layer; the cross-check
 (`experiments/run_sys_crosscheck.py`) verifies the two against each other on
-every evaluation cell.
+every cell of the evaluation grid.
 
 ## Build and run
 

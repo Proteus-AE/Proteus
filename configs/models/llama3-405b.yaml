@@ -1,0 +1,17 @@
+# Llama-3.1-405B (dense, GQA) -- Table I; used by the multi-device
+# scalability study (Sec. V-F).
+name: Llama-3.1-405B
+arch: dense
+attention: gqa
+n_layers: 126
+d_model: 16384
+n_heads: 128
+n_kv_heads: 8            # query-group size g = 128/8 = 16
+d_head: 128
+d_ffn: 53248
+weight_bytes: 810.0e+9   # total FP16 parameter footprint
+active_params: 405.0e+9  # parameters touched per token (dense: all)
+# 2 (K,V) x 2 B x 8 x 128 x 126 = 516096 B = 504 KiB (Table I)
+kv_bytes_per_token: 516096
+moe:
+  enabled: false

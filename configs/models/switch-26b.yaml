@@ -10,7 +10,8 @@ d_head: 64
 d_ffn: 4096
 weight_bytes: 52.0e+9
 active_params: 1.4e+9
-kv_bytes_per_token: 96.0e+3
+# 2 (K,V) x 2 B x 16 x 64 x 24 = 98304 B = 96 KiB (Table I)
+kv_bytes_per_token: 98304
 moe:
   enabled: true
   n_experts: 128

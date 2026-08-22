@@ -6,7 +6,7 @@ command-level LPDDR5X-PIM backend, and quantifies the mechanisms of Sec. IV-C
 at command granularity:
 
   (1) sustained internal bandwidth & row-buffer locality of all-bank
-      streaming (calibrates the 0.80 streaming-efficiency constant);
+      streaming, against the closed form of proteus_sim/memory.py;
   (2) effective operand reuse of broadcasting vs. direct connectivity for
       skinny-GEMMs of 1..32 concurrent vectors (the ceil(n/4) pass model);
   (3) xPU co-execution headroom: channel-busy fraction for an iso-work
@@ -27,9 +27,9 @@ MEM = "lpddr5x-8533"
 ROWS = 96          # rows per bank streamed per pass (steady state)
 
 
-def channel_peak(mem):
-    bgs = mem["dies_per_channel"] * mem["bankgroups_per_die"]
-    return bgs * 32 / (mem["tCCD_L_ns"] / 2.0) * 1e9   # B/s per channel
+def channel_peak(mem, mode="direct"):
+    """All-bank peak read bandwidth of one channel in a connectivity mode."""
+    return PimChannel(mem, mode=mode).peak_bw(mode)
 
 
 def bench_streaming(mem):
@@ -44,7 +44,7 @@ def bench_streaming(mem):
     print(f"  row-hit rate {stats.row_hits/stats.n_rd_burst:.3f} | "
           f"refresh events {stats.n_refresh}")
     print(f"  analytical layer uses {dmem.internal_eff:.2f} "
-          f"(configs stream_efficiency) -> deviation "
+          f"(closed form) -> deviation "
           f"{abs(eff/dmem.internal_eff-1)*100:.1f}%")
     return [["allbank_stream", f"{stats.sustained_bw()/1e9:.2f}",
              f"{eff:.4f}", f"{stats.row_hits/stats.n_rd_burst:.4f}"]], eff
@@ -64,29 +64,41 @@ def bench_broadcast(mem):
         out.append([n, round(td), round(tb), round(td / tb, 2),
                     round(reuse, 2)])
         print(f"  n={n:<3} direct {td/1e3:8.1f} us | broadcast {tb/1e3:8.1f} us"
-              f" | speedup {td/tb:5.2f}x (model: min(n,4) up to pass rounding)")
+              f" | speedup {td/tb:5.2f}x")
     return [rows_hdr] + out
 
 
 def bench_coexec(mem):
+    """Concurrent host bandwidth each connectivity mode leaves free.
+
+    The analytical layer derives this from the column slots the all-bank
+    stream does not use while it is streaming (`memory.coexec_bw`). Here the
+    event-driven backend counts the slots an attached host stream actually
+    claims over the whole kernel, which additionally includes the
+    command-bus and refresh time during which the bank column ports are idle
+    as well -- so the closed form is the conservative bracket of the two.
+    Both agree exactly that direct mode returns nothing."""
     print("\n== (3) co-execution headroom (iso-work, n=8 vectors) ==========")
-    hdr = ["mode", "kernel_ns", "busy_frac_vs_direct", "xpu_slots_frac"]
+    hdr = ["mode", "kernel_ns", "host_bursts_per_pim_burst",
+           "closed_form", "dev_pct"]
     out = [hdr]
-    t_ref = None
     for mode in ["direct", "broadcast"]:
         ch = PimChannel(mem, mode)
         ch.attach_xpu_stream()
         st = ch.execute(skinny_gemm_trace(ROWS, 8, mem, mode=mode))
-        t_ref = t_ref or st.time_ns
-        busy = st.time_ns / t_ref
-        xpu_frac = st.xpu_bursts * 32 / max(st.bytes_read, 1)
-        out.append([mode, round(st.time_ns), round(busy, 3),
-                    round(xpu_frac, 4)])
-        print(f"  {mode:<9} kernel {st.time_ns/1e3:8.1f} us | busy vs direct "
-              f"{busy:５.2f} | in-kernel xPU slot share {xpu_frac:.3f}")
-    freed = 1 - out[2][1] / out[1][1]
-    print(f"  -> broadcasting frees {freed*100:.0f}% of channel time for "
-          f"concurrent xPU access (iso-work)")
+        measured = st.xpu_bursts / max(st.n_rd_burst, 1)
+        analytical = ch.host_slot_bursts(mode) / ch.n_banks
+        dev = abs(measured / analytical - 1) * 100 if analytical else 0.0
+        out.append([mode, round(st.time_ns), round(measured, 4),
+                    round(analytical, 4), round(dev, 1)])
+        print(f"  {mode:<9} kernel {st.time_ns/1e3:8.1f} us | host bursts per "
+              f"PIM burst {measured:.4f} measured vs {analytical:.4f} in "
+              f"closed form (+{dev:.0f}% of command-bus and refresh time)")
+    dmem = derive(mem)
+    print(f"  -> direct mode returns no memory-service slots; broadcasting "
+          f"returns {dmem.coexec_broadcast/1e12:.2f} TB/s per device, more "
+          f"than the {dmem.external_bw/1e12:.2f} TB/s external interface can "
+          f"absorb")
     return out
 
 

@@ -5,7 +5,9 @@
 For one decode layer of Llama-3.1-70B at batch 32 on one Proteus device:
 
   1. the compiler lowers the layer; the crossover scheduler assigns
-     attention to PIM (broadcast) and splits the weight GEMMs by x*;
+     attention to PIM (broadcast) and splits the weight GEMMs by x*.
+     Every device of the tensor-parallel group owns a 1/N shard of the
+     layer, its KV heads included (Sec. IV-B);
   2. XpuCore tiles the xPU-side share on the systolic arrays and lowers its
      DRAM traffic to a host-request stream;
   3. the command-level backend executes the PIM attention stream while the
@@ -34,9 +36,11 @@ def main():
     sys_ = build_system("proteus")
     w = build_workload(model, BATCH, 2048, 6144)
     r = sys_.simulate(w)
-    x = float(r.notes.split("x*=")[1].split()[0])
-    devices = r.counters["devices"]
-    layers = model["n_layers"] // devices
+    # Fraction of the layer's single-pass weight operands the scheduler put
+    # on the xPU; the complement is streamed by the near-bank PEs.
+    x = r.counters["xpu_weight_share"]
+    n_tp = r.counters["tp_width"]
+    layers = r.counters["layers_per_stage"]
 
     # ---- xPU side: tile the x* weight share of one layer ------------- #
     eng = XpuEngine(SystolicConfig())
@@ -49,12 +53,13 @@ def main():
              ("out_proj", BATCH, d, d),
              ("ffn_up", BATCH, d, 2 * dff),
              ("ffn_down", BATCH, dff, d)]
-    xbw = sys_.cfg["xpu"]["mem_bw_per_device"]
+    xbw = sys_.xpu_bw
     xpu_ns = 0.0
     xpu_bytes = 0.0
     rows_t = [["op", "tile", "compute_us", "memory_us", "bound", "util"]]
     for name, m, k, n in gemms:
-        t = eng.run_op(name, m, k, n, dram_bw=xbw)
+        # every device of the tensor-parallel group owns a 1/n_tp shard
+        t = eng.run_op(name, m, k, max(n // n_tp, 1), dram_bw=xbw)
         xpu_ns += t.time_ns * x          # x* work share of the operator
         xpu_bytes += t.schedule.dram_bytes * x
         rows_t.append([name,
@@ -73,7 +78,7 @@ def main():
     from proteus_sim.dram.commands import Command
     from proteus_sim.dram.commands import MODE
     kv_layer_bytes = BATCH * w.ctx_avg * model["kv_bytes_per_token"] \
-        / model["n_layers"]
+        / model["n_layers"] / n_tp
     kv_rows = max(1, layout_rows_per_bank(kv_layer_bytes, mem))
     import trace_gen.kernels as tk
     passes = math.ceil(w.attn_reuse / 4)
@@ -83,7 +88,7 @@ def main():
     from proteus_sim.dram.commands import WR_AB, PRE_AB
     cmds.append(Command(WR_AB, row=kv_rows, col=0))     # in-place KV append
     cmds.append(Command(PRE_AB))
-    wt_layer = (1 - x) * w.weight_bytes / model["n_layers"]
+    wt_layer = (1 - x) * w.weight_bytes / model["n_layers"] / n_tp
     wt_rows = max(1, layout_rows_per_bank(wt_layer, mem))
     cmds += skinny_gemm_trace(wt_rows, min(BATCH, 32), mem,
                               mode="broadcast", set_mode=False)
@@ -92,7 +97,7 @@ def main():
     st = ch.execute(cmds)
 
     # ---- closure ----------------------------------------------------- #
-    t_stage_ms = r.t_iter_ms * r.counters["inflight"] / devices
+    t_stage_ms = r.t_iter_ms / r.counters["pipeline_groups"]
     t_layer_analytical = t_stage_ms / layers * 1e6      # ns
     t_layer_cosim = max(st.time_ns, xpu_ns)
     dev = abs(t_layer_cosim / t_layer_analytical - 1)

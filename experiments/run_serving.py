@@ -1,98 +1,102 @@
 #!/usr/bin/env python3
-"""Continuous-batching serving dynamics (Sec. IV-D "Runtime Adaptation").
+"""Runtime adaptation under dynamic serving loads (Fig. 13, Sec. V-C).
 
-Closed-loop request-level simulation on Mixtral-8x7B: requests with
-lognormal prompt/output lengths decode one token per iteration; completions
-are immediately replaced, so batch composition, aggregate context, and
-per-expert routing drift continuously. The experiment records how the
-runtime re-derives placement each iteration: the co-execution split x*, the
-number of experts mapped to each substrate by the crossover model, and the
-resulting placement switches -- i.e., the adaptivity that a static mapping
-cannot provide.
+Replays a 30-minute production-style LLM serving trace on Mixtral-8x7B with
+continuous batching and up to 64 concurrent requests. Every request reserves
+peak KV capacity for its full input plus output length before admission and
+waits in FIFO order until that capacity frees; average per-token latency is
+completion time minus *arrival* time divided by output length, so queueing
+delay is charged to every token. Sweeping the offered load by scaling
+inter-arrival times traces each system's latency curve and locates the
+largest load at which it still attains the 30 ms per-token SLO for 90% of
+requests.
+
+Besides the six baselines the sweep includes **Proteus-Static**, which keeps
+the full Proteus hardware -- reconfigurable datapath, memory-side fusion, the
+lot -- and differs only in freezing the operator mapping at deployment time
+instead of re-deriving it every decode iteration.
 """
 import os
 
 from common import RESULTS, write_csv
-from proteus_sim import load_model, build_system
-from proteus_sim.serving import ServingSimulator
+from proteus_sim import build_system, load_model
+from proteus_sim.serving import SloServingSimulator, knee_load
+from proteus_sim.workload import build_workload
+from trace_gen.gen_requests import read_trace, summarize
 
 MODEL = "mixtral-8x7b"
-ITERS = 600
-SCENARIOS = {          # (max_batch, prompt_mean, out_mean)
-    "b32": (32, 2048, 256),   # throughput serving: stable placements
-    "b4": (4, 1024, 128),     # small-batch interactive: expert dropout
-}
+TRACE = os.path.join(os.path.dirname(__file__), "..", "request_traces",
+                     "azure30min.txt")
+MAX_CONCURRENT = 64
+SLO_MS = 30.0
+ATTAINMENT = 0.90
+SCALES = [0.14, 0.18, 0.22, 0.26, 0.30, 0.35, 0.40, 0.45, 0.50,
+          0.60, 0.70, 0.80, 0.90, 1.00, 1.15, 1.30, 1.50, 1.75,
+          2.00, 2.25, 2.50, 3.00]
+SYSTEMS = ["dgx-a100", "cxl-pnm", "cent", "neupims", "papi", "pimphony",
+           "proteus-static", "proteus"]
 
 
-def run_scenario(name, model, mb, pm, om):
-    sim = ServingSimulator(build_system("proteus"), model, max_batch=mb,
-                           prompt_mean=pm, out_mean=om)
-    recs = sim.run(ITERS)
-
-    rows = [[r.it, r.batch, round(r.mean_ctx), round(r.t_iter_ms, 3),
-             round(r.throughput), round(r.tokens_per_expert, 2),
-             round(r.x_split, 3), r.experts_on_xpu, r.experts_on_pim,
-             r.mode_switches, r.completed] for r in recs]
-    write_csv(os.path.join(RESULTS, f"serving_dynamics_{name}.csv"),
-              ["iter", "batch", "mean_ctx", "t_iter_ms", "tokens_s",
-               "tokens_per_expert", "x_split", "experts_xpu", "experts_pim",
-               "placement_switches", "completed"], rows)
-
-    warm = recs[50:]
-    thr = sum(r.throughput for r in warm) / len(warm)
-    sw = sum(r.mode_switches for r in warm)
-    xs = [r.x_split for r in warm]
-    from common import run_cell
-    ref_ctx = int(sum(r.mean_ctx for r in warm) / len(warm))
-    ref = run_cell("proteus", MODEL, mb, ctx=ref_ctx).throughput
-    print(f"\n[{name}] steady state over {len(warm)} iterations "
-          f"(batch {mb}):")
-    print(f"  mean throughput      : {thr:,.0f} tokens/s "
-          f"(steady-state point at same mean ctx: {ref:,.0f})")
-    print(f"  x* range             : {min(xs):.2f} .. {max(xs):.2f} "
-          f"(re-derived every iteration)")
-    print(f"  active experts       : "
-          f"{warm[-1].experts_on_xpu + warm[-1].experts_on_pim} "
-          f"({warm[-1].experts_on_xpu} xPU / {warm[-1].experts_on_pim} PIM)")
-    print(f"  placement switches   : {sw} over {len(warm)} iterations "
-          f"({sw/len(warm):.2f}/iter) -- routing-driven remapping")
-    print(f"  completed requests   : {sum(r.completed for r in recs)}")
-    return thr
-
-
-def cpp_steady(mb, pm, om):
-    """Run the C++ serving engine (pimcore_serve) on the same scenario and
-    return its steady-state mean throughput."""
-    import re
-    import subprocess
-    from proteus_sim.dram import pimcore_bridge as pc
-    pc.build()
-    exe = os.path.join(pc.BUILD_DIR, "pimcore_serve")
-    proc = subprocess.run(
-        [exe, "--configs", os.path.join(pc._ROOT, "configs"),
-         "--model", MODEL, "--batch", str(mb), "--prompt-mean", str(pm),
-         "--out-mean", str(om), "--iters", str(ITERS), "--csv", os.devnull],
-        check=True, capture_output=True, text=True)
-    m = re.search(r"([\d.]+) tokens/s", proc.stderr)
-    return float(m.group(1)) if m else None
+def make_system(name, model):
+    """Build a system; 'proteus-static' freezes the deployment-time mapping."""
+    if name != "proteus-static":
+        return build_system(name), None
+    sys_ = build_system("proteus")
+    ref = sys_.cfg["static_reference"]
+    w = build_workload(model, int(ref["concurrency"]), 0, 0,
+                       ctx_override=int(ref["context"]))
+    return sys_, sys_.deployment_plan(w)
 
 
 def main():
+    rows = read_trace(TRACE)
+    print("request trace: " + summarize(rows))
     model = load_model(MODEL)
-    xrows = []
-    for name, (mb, pm, om) in SCENARIOS.items():
-        py_thr = run_scenario(name, model, mb, pm, om)
-        cpp_thr = cpp_steady(mb, pm, om)
-        if cpp_thr:
-            dev = abs(cpp_thr - py_thr) / py_thr * 100
-            print(f"  C++ serving engine   : {cpp_thr:,.0f} tokens/s "
-                  f"(pimcore_serve, independent RNG; deviation {dev:.1f}%)")
-            xrows.append([name, round(py_thr), round(cpp_thr),
-                          f"{dev:.2f}%"])
-    if xrows:
-        write_csv(os.path.join(RESULTS, "serving_crosscheck.csv"),
-                  ["scenario", "python_tokens_s", "cpp_tokens_s",
-                   "deviation"], xrows)
+
+    table, summary = [], []
+    for name in SYSTEMS:
+        sys_, plan = make_system(name, model)
+        label = "Proteus-Static" if name == "proteus-static" \
+            else sys_.cfg["name"]
+        floor, curve = None, []
+        for sc in SCALES:
+            rep = SloServingSimulator(sys_, model, rows,
+                                      max_concurrent=MAX_CONCURRENT,
+                                      slo_ms=SLO_MS, load_scale=sc,
+                                      frozen_plan=plan).run()
+            r = rep.row()
+            r[0] = label
+            r.insert(1, sc)
+            table.append(r)
+            curve.append(rep)
+            if rep.completed:
+                floor = rep.mean_per_token_ms if floor is None \
+                    else min(floor, rep.mean_per_token_ms)
+        sustainable = knee_load(curve, ATTAINMENT)
+        summary.append((label, floor or 0.0, sustainable))
+        print(f"  {label:<15} latency floor {floor or 0:7.2f} ms   "
+              f"sustainable @ {ATTAINMENT:.0%} of {SLO_MS:g} ms SLO: "
+              f"{sustainable:8,.0f} tokens/s")
+
+    write_csv(os.path.join(RESULTS, "serving_slo_sweep.csv"),
+              ["system", "load_scale", "offered_tokens_s",
+               "achieved_tokens_s", "mean_per_token_ms", "p99_per_token_ms",
+               "slo_attainment", "mean_batch", "mean_queue_s", "completed"],
+              table)
+    write_csv(os.path.join(RESULTS, "serving_summary.csv"),
+              ["system", "latency_floor_ms", "sustainable_tokens_s"],
+              [[a, round(b, 3), round(c)] for a, b, c in summary])
+
+    d = {a: (b, c) for a, b, c in summary}
+    p_lat, p_load = d["Proteus"]
+    print()
+    for other in ("Proteus-Static", "PIMphony", "DGX-A100", "CENT", "CXL-PNM"):
+        if other not in d:
+            continue
+        lat, load = d[other]
+        print(f"  Proteus vs {other:<15}: sustainable load "
+              f"{p_load / load if load else float('inf'):5.2f}x, "
+              f"unsaturated latency {lat / p_lat if p_lat else 0:5.2f}x lower")
 
 
 if __name__ == "__main__":

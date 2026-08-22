@@ -1,4 +1,8 @@
-"""Shared experiment definitions (Sec. V evaluation setup)."""
+"""Shared experiment definitions (Sec. V evaluation setup).
+
+Also re-exports ``CONFIG_DIR`` so the scripts that drive the C++ binaries
+point them at the same configuration tree the Python layer reads.
+"""
 import csv
 import os
 import sys
@@ -8,6 +12,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from proteus_sim import load_model, build_system          # noqa: E402
+from proteus_sim.config import CONFIG_DIR                 # noqa: E402,F401
 from proteus_sim.workload import build_workload           # noqa: E402
 from proteus_sim.system import VARIANTS                   # noqa: E402
 

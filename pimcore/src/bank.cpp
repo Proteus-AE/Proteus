@@ -4,41 +4,45 @@
 
 namespace pimcore {
 
-ns_t Bank::apply_act(ns_t t, int row, const TimingParams& p) {
+ns_t Bank::apply_act(ns_t t, int row, const TimingParams& p, bool all_bank) {
   t = std::max(t, next_act_);
   phase_ = BankPhase::ACTIVE;
   open_row_ = row;
   act_time_ = t;
   ++acts;
   next_act_ = t + p.tRC;
-  next_col_ = std::max(next_col_, t + p.tRCD);
-  next_pre_ = std::max(next_pre_, t + p.tRAS);
+  next_col_ = std::max(next_col_,
+                       t + (all_bank ? p.allbank_rcd : p.tRCD));
+  next_pre_ = std::max(next_pre_,
+                       t + (all_bank ? p.allbank_ras : p.tRAS));
   return t;
 }
 
-ns_t Bank::apply_read(ns_t t, const TimingParams& p) {
+ns_t Bank::apply_read(ns_t t, const TimingParams& p, ns_t cadence) {
   t = std::max(t, next_col_);
   // write-to-read turnaround on the same bank
   t = std::max(t, last_write_ + p.tWTR);
   ++reads;
-  next_col_ = std::max(next_col_, t + p.tCCD_L);
+  next_col_ = std::max(next_col_,
+                       t + (cadence > 0.0 ? cadence : p.tCCD_L));
   next_pre_ = std::max(next_pre_, t + p.tRTP);
   return t;
 }
 
-ns_t Bank::apply_write(ns_t t, const TimingParams& p) {
+ns_t Bank::apply_write(ns_t t, const TimingParams& p, ns_t cadence) {
   t = std::max(t, next_col_);
   ++writes;
   last_write_ = t;
-  next_col_ = std::max(next_col_, t + p.tCCD_L);
+  next_col_ = std::max(next_col_, t + (cadence > 0.0 ? cadence : p.tCCD_L));
   next_pre_ = std::max(next_pre_, t + p.tWR);
   return t;
 }
 
-void Bank::apply_pre(ns_t t, const TimingParams& p) {
+void Bank::apply_pre(ns_t t, const TimingParams& p, bool all_bank) {
   phase_ = BankPhase::IDLE;
   open_row_ = -1;
-  next_act_ = std::max(next_act_, std::max(t, next_pre_) + p.tRP);
+  next_act_ = std::max(next_act_, std::max(t, next_pre_) +
+                                      (all_bank ? p.allbank_rp : p.tRP));
 }
 
 ns_t DieState::constrain_act(ns_t t) {

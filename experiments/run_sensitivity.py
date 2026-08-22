@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sensitivity analysis (Fig. "sen", Sec. V-D): Mixtral-8x7B throughput
+"""Sensitivity analysis (Fig. 16, Sec. V-E): Mixtral-8x7B throughput
 (a) across sustained context lengths at batch 32 and (b) across batch sizes,
 normalized to CXL-PNM."""
 import os

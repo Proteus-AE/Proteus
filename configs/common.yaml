@@ -1,8 +1,25 @@
-# Cross-system workload/hardware interaction constants.
-# Short-payload derate: for small hidden dimensions (d_model <= threshold) the
+# Cross-system constants: quantities that describe the serving stack rather
+# than any one architecture, and that must therefore be charged identically
+# to every evaluated system.
+
+# Short-payload derate. For small hidden dimensions (d_model <= threshold) the
 # per-command column payload is too short to amortize command and
 # row-activation overheads, reducing sustained efficiency uniformly on every
 # evaluated system (Sec. V-A).
 short_payload:
   d_model_threshold: 1024
   system_efficiency: 0.65
+
+# Per-iteration host framework cost.
+#
+# Every evaluated system is driven by a host serving runtime that, once per
+# decode iteration, runs the scheduler, prepares inputs, launches the
+# iteration's work and post-processes the sampled tokens. Measurements on
+# vLLM bound this residual: enabling CUDA-graph replay removes ~7 ms of
+# per-step kernel-launch cost for a 70B model on A100 [inferacthq.com,
+# "CUDA Graph Replay"], and the remaining framework time is scheduling,
+# input preparation, sampling and detokenization [vLLM v0.6.0 performance
+# notes]. We charge the same residual to all seven systems, including
+# Proteus, so that no system is credited with a free runtime; Proteus's own
+# scheduler cost is reported separately and is microsecond-scale (Sec. V-B).
+host_iteration_overhead_ms: 0.30

@@ -1,17 +1,23 @@
-# PIMphony baseline (2026): orchestration system for PIM-based long-context
-# inference on AiMX-class devices. Its TCP/kernel-orchestration/DCS techniques
-# are credited as bandwidth-utilization and overlap gains over the NeuPIMs-style
-# execution model (see proteus_sim/baselines/pimphony.py).
+# PIMphony baseline (HPCA'26): orchestration system for PIM-based
+# long-context inference on AiMX-class devices. Its three techniques --
+# Token-Centric PIM Partitioning (channel utilization), Dynamic PIM Command
+# Scheduling (data-movement/compute overlap) and the Dynamic PIM Access
+# controller (dynamic memory management) -- are credited as a channel
+# utilization term and an aggregate orchestration gain over the
+# NeuPIMs-style execution model (see proteus_sim/baselines/pimphony.py).
 name: PIMphony
 kind: pimphony
 devices: 8
 capacity: 256.0e+9                 # 8 x 32 GB AiMX modules
+usable_fraction: 0.90
 aim_internal_per_device: 32.0e+12  # AiMX all-bank internal bandwidth (attention)
 pim_stream_efficiency: 0.80
-pim_util: 0.90                     # TCP channel-utilization recovery
-orchestration_gain: 1.09           # kernel orchestration + DCS overlap gain
-weight_stream_curve: {base: 0.28, log2_slope: 0.077, cap: 0.70}
+pim_util: 0.90                     # TCP channel-utilization recovery [ASSUME]
+orchestration_gain: 1.09           # aggregate DCS + DPA gain [ASSUME]
+weight_stream: 0.649               # same NPU-class streaming path as NeuPIMs
 xpu_bw_aggregate: 16.0e+12
+# Sec. V-A: heterogeneous systems match Proteus's aggregate xPU throughput.
+xpu_flops_aggregate: 2496.0e+12    # 8 x 312 TFLOPS
 overlap_overhead: 1.02
 
 energy:
@@ -19,7 +25,19 @@ energy:
   xpu_idle_w: 80.0
   pim_pe_w_per_device: 10.0
   static_w: 150.0
-  hbm_pj_per_bit: 3.9
-  aim_int_pj_per_bit: 2.5
+  hbm_pj_per_bit: 3.9          # HBM external access energy
+  # The busy/idle figures above are accelerator-die power; the HBM stacks
+  # draw their own background power, charged per unit of resident capacity.
   background_w_per_gb: 1.5
   background_idle_factor: 0.3
+  aim_int_pj_per_bit: 2.5
+
+# Tensor-parallel collectives. Every evaluated system distributes each layer
+# over its eight devices and therefore pays two ring AllReduces per
+# transformer block; the cost is charged from the device's own interconnect.
+# NVLink-class accelerator fabric [ASSUME]
+interconnect:
+  kind: nvlink-class
+  link_bytes_per_s_per_dir: 300.0e+9
+  end_to_end_latency_ns: 700
+tp_collectives_per_layer: 2

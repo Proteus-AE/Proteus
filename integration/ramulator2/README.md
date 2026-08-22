@@ -23,10 +23,28 @@ git apply /path/to/proteus-sim/integration/ramulator2/patches/*.patch
 # then add the three .cpp files to the build (they are picked up
 # automatically if the tree globs src/**/*.cpp; otherwise list them in
 # CMakeLists.txt) and rebuild.
+python3 /path/to/proteus-sim/trace_gen/gen_trace.py --kernel skinny-gemm \
+    --rows 64 --vectors 8 --mode broadcast -o gemm.trace
 ./ramulator2 -f example_config/proteus-lpddr5x-pim.yaml
 ```
 
 `patch -p1 < patches/....patch` works equally.
+
+## Trace replay
+
+`ProteusTraceReplay` reads the command traces of `proteus_sim/dram/trace.py`
+as `trace_gen/gen_trace.py` writes them -- `MODE <direct|broadcast>`,
+`ACT_AB <row>`, `RDMAC_AB <row> <col>`, `WR_AB <row> <col>`, `PRE_AB`, the
+single-bank host commands `ACT`/`RD`/`PRE <row> <col> <bank>`, and
+`BARRIER`, with `#` comment lines -- and reports the offending line number
+on anything else. Column commands become the `pim-mac`, `pim-mac-broadcast`,
+`pim-write`, `pim-mode` and `read` request types of the device model;
+RDMAC_AB picks its broadcast variant from the mode register the preceding
+MODE line set. Row control is left to the device model, whose prerequisite
+chain issues ACTab/PREab on its own, so the row commands of the trace are
+consumed as bookkeeping. The frontend's `bankgroups` and `banks_per_group`
+parameters split the channel-global bank id of a host command and must match
+`MemorySystem.DRAM.org`.
 
 ## Scope and caveats
 

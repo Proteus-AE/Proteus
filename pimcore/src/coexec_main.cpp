@@ -5,7 +5,7 @@
 //   mode,policy,offered_gbps,pim_slowdown,host_gbps,host_lat_mean,host_lat_p95
 //
 // Example:
-//   pimcore_coexec --config configs/lpddr5x-8533.yaml --rows 48 --vectors 8
+//   pimcore_coexec --memory lpddr5x-8533 --rows 48 --vectors 8
 #include <cstdio>
 #include <iostream>
 #include <string>
@@ -17,54 +17,42 @@
 
 using namespace pimcore;
 
-int main(int argc, char** argv) {
-  std::string config_path;
+namespace {
+
+struct Options {
+  std::string cfg_file;
+  std::string configs = "../../configs";
+  std::string memory = "lpddr5x-8533";
   int rows = 48;
   int vectors = 8;
   std::string pattern = "stream";
   bool host_only = false;
   double duration_us = 100.0;
-  double offered = 0.0;                 // 0 = closed loop
+  double offered = 0.0;               // 0 = closed loop
   int bursts_per_req = 2;
+};
 
-  for (int i = 1; i < argc; ++i) {
-    std::string a = argv[i];
-    auto next = [&]() { return std::string(argv[++i]); };
-    if (a == "--config") config_path = next();
-    else if (a == "--rows") rows = std::stoi(next());
-    else if (a == "--vectors") vectors = std::stoi(next());
-    else if (a == "--pattern") pattern = next();
-    else if (a == "--host-only") host_only = true;
-    else if (a == "--duration-us") duration_us = std::stod(next());
-    else if (a == "--offered") offered = std::stod(next());
-    else if (a == "--bursts-per-req") bursts_per_req = std::stoi(next());
-    else {
-      std::cerr << "unknown option " << a << "\n";
-      return 2;
-    }
-  }
+int run(const Options& o) {
+  ConfigNode cfg =
+      o.cfg_file.empty()
+          ? load_config(o.configs, "memory", o.memory, "--memory")
+          : ConfigNode::load_file(o.cfg_file);
+  TimingParams timing = TimingParams::from_config(cfg);
+  Geometry geom = Geometry::from_config(cfg);
 
-  ConfigNode cfg;
-  if (!config_path.empty()) cfg = ConfigNode::load_file(config_path);
-  Substrate sub = Substrate::LPDDR5X_PIM;
-  if (cfg.has("substrate"))
-    sub = substrate_from_string(cfg.get_string("substrate"));
-  TimingParams timing = TimingParams::from_config(cfg, sub);
-  Geometry geom = Geometry::from_config(cfg, sub);
-
-  if (host_only) {
+  if (o.host_only) {
     // Host traffic only (no PIM stream): the configuration compared
     // against external memory simulators (experiments/run_ramulator_xcheck).
     CoExecConfig cc;
-    cc.pattern = pattern_from_string(pattern);
-    cc.offered_gbps = offered;
-    cc.bursts_per_req = bursts_per_req;
+    cc.pattern = pattern_from_string(o.pattern);
+    cc.offered_gbps = o.offered;
+    cc.bursts_per_req = o.bursts_per_req;
     CoExecEngine eng(timing, geom, ConnectivityMode::DIRECT, cc);
-    CoExecReport rep = eng.host_only(duration_us * 1e3);
+    CoExecReport rep = eng.host_only(o.duration_us * 1e3);
     std::printf("pattern,duration_us,host_gbps,host_lat_mean_ns,"
                 "host_lat_p95_ns,host_served\n");
-    std::printf("%s,%.1f,%.3f,%.1f,%.1f,%llu\n", pattern.c_str(),
-                duration_us, rep.host_bw / 1e9, rep.host_latency_mean,
+    std::printf("%s,%.1f,%.3f,%.1f,%.1f,%llu\n", o.pattern.c_str(),
+                o.duration_us, rep.host_bw / 1e9, rep.host_latency_mean,
                 rep.host_latency_p95,
                 static_cast<unsigned long long>(rep.host_served));
     return 0;
@@ -82,15 +70,16 @@ int main(int argc, char** argv) {
 
   for (ConnectivityMode m : modes) {
     KernelParams kp;
-    kp.rows_per_bank = rows;
-    kp.n_vectors = vectors;
+    kp.rows_per_bank = o.rows;
+    kp.n_vectors = o.vectors;
     kp.mode = m;
+    kp.broadcast_fanout = geom.broadcast_fanout;
     auto stream = skinny_gemm_kernel(kp, timing);
     for (ArbitrationPolicy p : policies) {
       for (double load : loads) {
         CoExecConfig cc;
         cc.policy = p;
-        cc.pattern = pattern_from_string(pattern);
+        cc.pattern = pattern_from_string(o.pattern);
         cc.offered_gbps = load;
         CoExecEngine eng(timing, geom, m, cc);
         CoExecReport rep = eng.run(stream);
@@ -107,4 +96,35 @@ int main(int argc, char** argv) {
     }
   }
   return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  Options o;
+  for (int i = 1; i < argc; ++i) {
+    std::string a = argv[i];
+    auto next = [&]() { return std::string(argv[++i]); };
+    if (a == "--config") o.cfg_file = next();
+    else if (a == "--configs") o.configs = next();
+    else if (a == "--memory") o.memory = next();
+    else if (a == "--rows") o.rows = std::stoi(next());
+    else if (a == "--vectors") o.vectors = std::stoi(next());
+    else if (a == "--pattern") o.pattern = next();
+    else if (a == "--host-only") o.host_only = true;
+    else if (a == "--duration-us") o.duration_us = std::stod(next());
+    else if (a == "--offered") o.offered = std::stod(next());
+    else if (a == "--bursts-per-req") o.bursts_per_req = std::stoi(next());
+    else {
+      std::cerr << "unknown option " << a << "\n";
+      return 2;
+    }
+  }
+
+  try {
+    return run(o);
+  } catch (const std::exception& e) {
+    std::cerr << "pimcore_coexec: " << e.what() << "\n";
+    return 1;
+  }
 }

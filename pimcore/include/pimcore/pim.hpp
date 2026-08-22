@@ -16,9 +16,13 @@ namespace pimcore {
 // entry; a full FIFO back-pressures the producing bank readout.
 class ProcessingElement {
  public:
-  void configure(int fifo_depth, double freq_ghz) {
+  // `mac_ns` is the interval at which the pipeline retires one operand
+  // burst: an issue consumes the whole burst against the resident input
+  // vector, so it follows from the burst payload, the lane count and the PE
+  // clock together (Geometry::mac_ns).
+  void configure(int fifo_depth, double mac_ns) {
     fifo_depth_ = fifo_depth;
-    mac_ns_ = 1.0 / freq_ghz;
+    mac_ns_ = mac_ns;
   }
 
   // Push one operand burst at absolute time `t`; returns the stall imposed
@@ -63,6 +67,11 @@ class BankGroupBus {
     return slot;
   }
 
+  // Hold the bus until `until`, for a transfer whose start time was fixed
+  // before the transfer itself could be timed (a broadcast readout waits for
+  // the bus first and only then learns its FIFO back-pressure).
+  void reserve(ns_t until) { next_free_ = until; }
+
   // Gap available before `deadline` (for opportunistic host slots).
   ns_t gap_before(ns_t deadline) const {
     return deadline > next_free_ ? deadline - next_free_ : 0.0;
@@ -79,13 +88,15 @@ class ModeController {
  public:
   ConnectivityMode mode() const { return mode_; }
 
-  ns_t switch_mode(ConnectivityMode m, ns_t t, ns_t fifo_drain,
-                   ns_t ca_cmd_ns) {
-    if (m == mode_) return t;
-    ns_t eff = std::max(t, fifo_drain) + ca_cmd_ns;
+  // Adopt `m` as the channel's connectivity; returns true when that is an
+  // actual reconfiguration. A mode command that re-selects the mode already
+  // in force still drains the in-flight FIFOs and occupies the command bus,
+  // but it reconfigures nothing and is not counted as a switch.
+  bool switch_mode(ConnectivityMode m) {
+    if (m == mode_) return false;
     mode_ = m;
     ++switches_;
-    return eff;
+    return true;
   }
 
   uint64_t switches() const { return switches_; }

@@ -43,9 +43,8 @@ def builtin_host_bw(build_dir, pattern):
 
 
 def main():
-    pc.build()
+    tgen = pc.binary("pimcore_tracegen")
     build_dir = pc.BUILD_DIR
-    tgen = os.path.join(build_dir, "pimcore_tracegen")
 
     try:
         ram.find_binary()

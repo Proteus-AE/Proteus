@@ -1,0 +1,68 @@
+# Reference points the simulator is validated against (Sec. V-A).
+#
+# Every entry names the quantity, the value reported by the reference, and
+# where that value comes from. `tolerance` is the deviation the artifact
+# treats as agreement; experiments/run_validation.py measures each quantity
+# from the simulator and fails the run if any entry exceeds its tolerance.
+#
+# Entries whose `source` is a measurement on real hardware (the vLLM/A100
+# baseline) carry the numbers recorded during that measurement; replacing
+# them re-validates the artifact against a fresh run.
+
+near_bank_pim:
+  - name: aim_allbank_peak_tflops
+    reported: 16.0
+    tolerance: 0.03
+    source: >
+      Published near-bank AiM PIM operating point, as used for the roofline
+      of Sec. III-B: all-bank FP16 MAC throughput of the AiM device.
+  - name: aim_allbank_internal_tbps
+    reported: 16.0
+    tolerance: 0.03
+    source: >
+      Published near-bank AiM PIM internal (all-bank) read bandwidth, same
+      reference as above.
+# Cross-layer closure: the closed-form sustained rates of the analytical
+# layer must reproduce what the event-driven command-level backend actually
+# executes, on every substrate. `reported` is the analytical prediction
+# (recomputed at run time), so these entries measure implementation
+# agreement rather than an external reference.
+cross_layer:
+  - name: lpddr5x_direct_sustained_tbps
+    tolerance: 0.05
+    source: analytical proteus_sim.memory.derive vs the command-level backend
+  - name: lpddr5x_broadcast_sustained_tbps
+    tolerance: 0.05
+    source: analytical proteus_sim.memory.derive vs the command-level backend
+  - name: aim_direct_sustained_tbps
+    tolerance: 0.08
+    source: >
+      analytical closed form vs the command-level backend on the AiM-class
+      substrate (a different timing table and a fixed one-to-one datapath)
+
+xpu:
+  - name: a100_peak_tflops_fp16
+    reported: 312.0
+    tolerance: 0.02
+    source: NVIDIA A100 datasheet (FP16 tensor-core throughput).
+  - name: a100_hbm_tbps
+    reported: 2.039
+    tolerance: 0.02
+    source: NVIDIA A100 80GB datasheet (HBM2e bandwidth).
+  - name: a100_ridge_flops_per_byte
+    reported: 153.0
+    tolerance: 0.02
+    source: Sec. III-B, derived from the two datasheet values above.
+
+# Per-device organization each baseline's own work reports. The simulator
+# must be configured with exactly these values (Sec. V-A: "preserving the
+# per-device capacity, bandwidth, compute organization, and datapath
+# reported by each work").
+baseline_organization:
+  dgx-a100:   {capacity_gb: 640,  bandwidth_tbps: 16.312, devices: 8}
+  cxl-pnm:    {capacity_gb: 4096, bandwidth_tbps: 8.8,  devices: 8}
+  cent:       {capacity_gb: 128,  bandwidth_tbps: 128.0, devices: 8}
+  neupims:    {capacity_gb: 256,  bandwidth_tbps: 16.0, devices: 8}
+  papi:       {capacity_gb: 256,  bandwidth_tbps: 16.0, devices: 8}
+  pimphony:   {capacity_gb: 256,  bandwidth_tbps: 16.0, devices: 8}
+  proteus:    {capacity_gb: 2048, bandwidth_tbps: 131.07, devices: 8}

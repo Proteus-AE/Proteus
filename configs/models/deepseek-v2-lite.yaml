@@ -7,16 +7,19 @@ d_model: 2048
 n_heads: 16
 n_kv_heads: 1            # MLA latent KV shared by all heads
 d_head: 128
+d_kv_lora: 512           # compressed latent KV dimension
+d_rope: 64               # decoupled RoPE key dimension
 d_ffn: 10944
 # Under weight-absorbed MLA decode, the shared latent KV gives an effective
 # attention operand-reuse factor close to the head count (Sec. IV-D).
 attention_reuse: 16
 weight_bytes: 31.0e+9
 active_params: 2.4e+9
-kv_bytes_per_token: 31.0e+3   # compressed latent KV (c_kv + rope) per token
+# absorbed MLA: (d_kv_lora + d_rope) x 2 B x n_layers = (512+64)*2*27
+kv_bytes_per_token: 31104
 moe:
   enabled: true
-  n_experts: 64
-  top_k: 6
+  n_experts: 64          # routed experts; the two shared experts are always
+  top_k: 6               # active and are accounted in `dense_bytes`
   expert_bytes: 17.3e+6
   dense_bytes: 1.5e+9

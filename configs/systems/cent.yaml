@@ -5,15 +5,34 @@
 name: CENT
 kind: cent
 devices: 8
-capacity_per_device: 16.0e+9       # native GDDR6-AiM module capacity
-internal_bw_per_device: 16.0e+12   # all-bank aggregate
-stream_efficiency: 0.80
-host_cmd_overhead_ms: 1.0          # host-driven command stream per iteration
+capacity_per_device: 16.0e+9       # 16 GB/device (reported, Table 1)
+internal_bw_per_device: 16.0e+12   # 16 TB/s all-bank internal (reported)
+external_bw_per_device: 1.0e+12    # 1 TB/s external (reported)
+usable_fraction: 0.90
+# Sustained all-bank GEMV streaming efficiency of this substrate, as the
+# command-level backend measures it on the GDDR6-AiM timing table
+# (experiments/run_validation.py reports the same figure).
+stream_efficiency: 0.634
+# 16 TFLOPS of near-bank arithmetic per device (reported, Table 1).
+pim_flops_aggregate: 128.0e+12
 small_op_efficiency: {tpe_lt2: 0.5, tpe_lt4: 0.7, else: 1.0}
 
 energy:
-  device_w: 40.0                   # CXL controller + AiM-chip logic
+  # Measured per-device average over a decode run, covering the CXL
+  # controller, the AiM-chip logic and the GDDR6 devices themselves, so no
+  # separate memory background term is charged.
+  device_w: 32.4
   static_w: 150.0
   gddr_int_pj_per_bit: 3.5
-  background_w_per_gb: 1.2
-  background_idle_factor: 0.3
+
+# CENT is GPU-free and pipelines whole layers across its devices rather than
+# sharding them, so it performs no tensor-parallel AllReduce: the only
+# per-token communication is one activation vector per pipeline-stage
+# boundary, forwarded over the CXL fabric (the work reports 16 KB per
+# boundary for a d = 8192 model). Its devices attach over x4 CXL lanes.
+interconnect:
+  kind: cxl3-x4
+  link_bytes_per_s_per_dir: 32.0e+9   # x4 PCIe 6.0 lanes per device
+  end_to_end_latency_ns: 165
+tp_collectives_per_layer: 0
+pipeline_boundaries_per_token: 8      # one per device in the pipeline

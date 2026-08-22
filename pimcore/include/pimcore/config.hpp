@@ -52,4 +52,15 @@ class ConfigNode {
   std::map<std::string, ConfigNode> children_;
 };
 
+// Resolve one file of the repository configuration tree: `config_root` is the
+// `configs/` directory, `kind` one of its subdirectories ("memory", "models",
+// "systems") and `name` the file's stem. `option` names the command-line
+// argument the name came from, so a typo is reported against the argument
+// that carried it rather than against a path assembled from an empty string.
+std::string config_path(const std::string& config_root,
+                        const std::string& kind, const std::string& name,
+                        const std::string& option);
+ConfigNode load_config(const std::string& config_root, const std::string& kind,
+                       const std::string& name, const std::string& option);
+
 }  // namespace pimcore

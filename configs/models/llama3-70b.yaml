@@ -11,6 +11,7 @@ d_ffn: 28672
 # Derived / bookkeeping (FP16)
 weight_bytes: 140.0e+9   # total parameter footprint
 active_params: 70.0e+9   # parameters touched per token (dense: all)
-kv_bytes_per_token: 320.0e+3   # 2 (K,V) * 2 B * n_kv_heads * d_head * n_layers
+# 2 (K,V) x 2 B x n_kv_heads x d_head x n_layers = 2*2*8*128*80 = 320 KiB
+kv_bytes_per_token: 327680
 moe:
   enabled: false

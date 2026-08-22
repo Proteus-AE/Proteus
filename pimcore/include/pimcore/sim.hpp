@@ -11,8 +11,7 @@
 namespace pimcore {
 
 struct SimOptions {
-  std::string config_path;
-  Substrate substrate = Substrate::LPDDR5X_PIM;
+  std::string config_path;       // configs/memory/<substrate>.yaml
   std::string kernel;            // gemv | skinny-gemm | attention | "" (trace)
   std::string trace_path;
   KernelParams kernel_params;
@@ -27,6 +26,7 @@ struct SimReport {
   EnergyBreakdown energy;
   double peak_bw = 0.0;
   int device_channels = 1;       // SPMD scale factor for device-level rates
+  std::string substrate;         // `name:` of the memory configuration
 
   std::string format() const;
   std::string to_json() const;
@@ -42,6 +42,7 @@ class Simulator {
 
  private:
   SimOptions opt_;
+  ConfigNode mem_;
   TimingParams timing_;
   Geometry geom_;
   EnergyTable energy_;

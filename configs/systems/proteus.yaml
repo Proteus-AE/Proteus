@@ -1,42 +1,97 @@
-# Proteus device + system configuration (Table "System configuration", Sec. V-A)
+# Proteus device + system configuration (Table III, Sec. V-A).
 name: Proteus
 kind: proteus
 devices: 8
 memory: lpddr5x-8533           # -> configs/memory/lpddr5x-8533.yaml
 
 xpu:
-  flops_fp16: 312.0e+12        # A100-class matrix engine (fair-comparison setting)
-  # The xPU shares the unified LPDDR memory; its sustained streaming bandwidth
-  # over the external interface (concurrent with PIM row service):
-  mem_bw_per_device: 0.85e+12
+  flops_fp16: 312.0e+12        # A100-class matrix engine per device (Table III)
+  # The xPU shares the unified LPDDR address space and streams its operands
+  # over the device's external interface, so both its peak and its sustained
+  # rate are the ones derived in the memory configuration. This is what makes
+  # the xPU ridge point AI_xPU = F_xPU / BW_out equal 312 (Sec. III-B).
+
+# Memory-hierarchy-aligned parallelism (Sec. IV-B, Fig. 6).
+#   group level   : up to `group_size` devices inside one CXL switch domain
+#                   form a tensor-parallel group; every device holds a shard
+#                   of every layer together with its resident KV shard.
+#   across groups : pipeline parallelism at whole-layer granularity; only
+#                   activations cross a switch domain.
+parallelism:
+  group_size: 8                # devices per switch domain (tensor-parallel width)
+  tp_collectives_per_layer: 2  # attention output projection + FFN output
+  whole_layer_partition: true  # trailing groups hold one fewer layer
 
 interconnect:
   kind: cxl3-switch
-  link_gbps_per_dir: 128.0e+9
+  link_bytes_per_s_per_dir: 128.0e+9   # x16 PCIe 6.0 port, 128 GB/s/direction
   end_to_end_latency_ns: 165   # 25 port + 10 retimer + 70 switch + 60 ctrl/DRAM
-  per_stage_overhead_ms: 0.05  # activation staging + doorbell + stage sync
-  scheduling_overhead_ms: 0.01 # per-iteration crossover re-evaluation (Sec. IV-D)
+  doorbell_ns: 300             # staging-region doorbell + stage synchronization
+  scheduling_overhead_ms: 0.005 # per-iteration crossover re-evaluation (Sec. IV-D)
 
 pipeline:
   efficiency: 0.95             # bubble/imbalance factor of PP stages
-  # Decode is autoregressive: one batch cannot fill its own pipeline. The
-  # runtime keeps m independent in-flight batches (m <= pipeline depth),
-  # bounded by aggregate KV-cache capacity (Sec. V-A, batch semantics).
+  # Decode is autoregressive: one micro-batch cannot fill its own pipeline.
+  # The runtime keeps m independent in-flight micro-batches (m <= number of
+  # pipeline groups), bounded by aggregate KV-cache capacity.
 
 capacity:
   usable_fraction: 0.90        # vLLM-style memory utilization cap
 
+# Deployment-time reference for the static-mapping configuration (Sec. V-C).
+# A static deployment derives its operator mapping once, before any traffic:
+# the service is brought up and profiled with a handful of short warm-up
+# requests, and the mapping, the connectivity mode and the co-execution split
+# that characterization produces are then frozen. Continuous batching drifts
+# away from that point in both directions -- towards longer contexts as the
+# generations grow, and towards far deeper batches at saturation -- so the
+# frozen mapping is wrong at both ends of the load range.
+static_reference:
+  concurrency: 2               # warm-up requests in flight
+  context: 1024                # warm-up sequence length
+
 scheduler:
-  crossover_ai: 32             # F_PIM / BW_out (Sec. IV-D)
-  broadcast_fanout: 4          # one-to-many bank-to-PE connectivity within a BG
+  # Analytical crossover estimate (Sec. IV-D): the decisive quantity in the
+  # crossover region is theta = F_PIM / BW_out, i.e. 32.768 TFLOPS over the
+  # 1 TB/s external interface of Table III (quoted as ~32 in the text).
+  # theta is not merely a threshold -- it is the estimator's view of the
+  # machine balance, so this entry is what a deployment would characterize.
+  crossover_ai: 32.768
+  runtime_adaptation: true     # revise crossover-region operators on load imbalance
+  # Margin by which the estimated alternative must beat the default before
+  # the runtime moves an operator; prevents a near-balanced operator from
+  # oscillating (and reconfiguring the datapath) every decode iteration.
+  adaptation_hysteresis: 1.0
   # Efficiency of PIM streaming for very small per-expert token counts
   # (short skinny-GEMM operand chains):
   small_op_efficiency: {tpe_lt2: 0.5, tpe_lt4: 0.7, else: 1.0}
+  # xPU GEMM efficiency when MoE routing fragments a shared-operand GEMM into
+  # per-token tiles (token-centric execution, the mechanism +EC removes).
+  moe_frag_efficiency: {base: 0.40, span: 0.35, saturate_tpe: 32}
+
+# Penalties that the incremental variants of Sec. V-D remove.
+variant_penalties:
+  per_op_command_issue: 0.70   # per-operator issue destroys row-buffer locality
+  sync_weight_stream: 0.74     # no asynchronous weight prefetch
+  unfused_stall: 0.22          # unfused nonlinear ops stall the PIM pipeline
+  # Without broadcasting the all-bank stream returns no memory-service slots,
+  # so the xPU and PIM phases can only interleave at coarse granularity and
+  # each switch costs a command-queue drain and an xPU DMA restart.
+  coarse_slicing: 1.12
+  # Token-centric MoE dispatch issues one command stream per routed token and
+  # drains the PE pipeline between them; expert-centric grouping amortizes
+  # both over the expert's whole token set.
+  token_centric_issue: 0.65
 
 energy:
-  xpu_busy_w: 180.0            # matrix engine w/o local HBM stacks [ASSUME]
-  xpu_idle_w: 60.0
+  # xPU engine power, split into the power it draws while clocked and
+  # servicing the unified memory path, and the additional dynamic power at
+  # full MAC utilization. An A100-class die without its HBM stacks [ASSUME].
+  xpu_idle_w: 120.0
+  xpu_busy_w: 210.0
   pe_sfu_w_per_device: 10.0
+  link_w_per_device: 6.0       # CXL x16 port idle/PHY power
+  link_pj_per_bit: 2.0         # CXL 3.0 SerDes + protocol, per transferred bit
   static_w: 150.0              # host + switch + misc
-  background_w_per_gb: 0.08    # LPDDR (Table I), x0.3 idle factor applied in code
+  background_w_per_gb: 0.08    # LPDDR (Table II), x0.3 idle factor applied in code
   background_idle_factor: 0.3

@@ -13,6 +13,7 @@
 // the next slot (host priority), or round-robins with the PIM stream.
 #pragma once
 
+#include <algorithm>
 #include <memory>
 #include <vector>
 
@@ -59,11 +60,63 @@ class Channel {
   const std::vector<Bank>& banks() const { return banks_; }
   ConnectivityMode mode() const { return mode_ctrl_.mode(); }
 
-  double peak_internal_bw() const {    // B/s, all BGs streaming
-    return geom_.bankgroups() * timing_.burst_bytes / (timing_.burst_ns * 1e-9);
+  // Bank column cycle of a connectivity mode. The near-bank read path is
+  // bank-private, so its cadence is the bank's own column cycle tCCD_PIM in
+  // direct mode, floored by the interval at which the PE accepts a burst;
+  // broadcasting distributes one readout to `broadcast_fanout` PEs over the
+  // shared bank-group wires, and each of them must then issue that many MACs,
+  // so the cadence relaxes to max(tCCD_L, fanout * mac_ns).
+  ns_t column_cadence(ConnectivityMode m) const {
+    ns_t mac = geom_.mac_ns(timing_.burst_bytes);
+    if (m == ConnectivityMode::BROADCAST)
+      return std::max(timing_.tCCD_L, geom_.broadcast_fanout * mac);
+    return std::max(timing_.tCCD_PIM, mac);
+  }
+  ns_t column_cadence() const { return column_cadence(mode_ctrl_.mode()); }
+
+  // B/s, all banks streaming into their local PEs.
+  double peak_internal_bw(ConnectivityMode m) const {
+    return geom_.banks() * timing_.burst_bytes /
+           (column_cadence(m) * 1e-9);
+  }
+  double peak_internal_bw() const {
+    return peak_internal_bw(mode_ctrl_.mode());
   }
 
+  // Column bursts per cadence this channel can still deliver to the external
+  // interface while the all-bank PIM stream runs (Sec. IV-B).
+  //
+  // A bank serves one column access per near-bank column cycle and the PIM
+  // stream claims one of those per cadence, leaving cadence/tCCD_PIM - 1 per
+  // bank. A host burst, unlike a near-bank read, does traverse the bank-group
+  // I/O and the channel's global I/O, so it is additionally bounded by tCCD_L
+  // per bank group and by the DQ occupancy of the channel. Direct mode runs
+  // at the minimum column cycle and therefore leaves nothing; broadcasting
+  // runs at the bank-group-bus cadence and leaves a full slot per bank.
+  double host_slot_bursts(ConnectivityMode m) const {
+    const ns_t cadence = column_cadence(m);
+    double free_per_bank = std::max(0.0, cadence / timing_.tCCD_PIM - 1.0);
+    return std::min({banks_.size() * free_per_bank,
+                     geom_.bankgroups() * cadence / timing_.tCCD_L,
+                     cadence / timing_.burst_ns});
+  }
+  double host_slot_bursts() const {
+    return host_slot_bursts(mode_ctrl_.mode());
+  }
+
+  // Concurrent external bandwidth of one channel (B/s).
+  double host_slot_bw(ConnectivityMode m) const {
+    return host_slot_bursts(m) * timing_.burst_bytes /
+           (column_cadence(m) * 1e-9);
+  }
+  double host_slot_bw() const { return host_slot_bw(mode_ctrl_.mode()); }
+
  private:
+  // One row activation on one bank, under the bank's own tRC, the die's
+  // tRRD/tFAW window (which all-bank commands are exempt from) and the
+  // refresh schedule; returns the effective activation time.
+  ns_t do_act(Bank& bank, int row, ns_t t, bool all_bank);
+
   // command handlers; each returns the completion time of the command
   ns_t do_act_ab(int row, ns_t t);
   ns_t do_rdmac_ab(int row, ns_t t);
@@ -71,11 +124,11 @@ class Channel {
   ns_t do_pre_ab(ns_t t);
   ns_t do_mode(ConnectivityMode m, ns_t t);
   ns_t do_single(const Command& c, ns_t t);
-  ns_t do_refresh_ab(ns_t t);
 
   ns_t issue_ca(ns_t t);
   ns_t max_fifo_drain() const;
   void host_fill_gap(int bg, ns_t gap_start, ns_t gap_end);
+  void host_steal_slots(ns_t t0, ns_t t1, ns_t cadence);
   void host_generate(ns_t now);
 
   TimingParams timing_;
@@ -86,11 +139,13 @@ class Channel {
   std::vector<ProcessingElement> pes_;
   ModeController mode_ctrl_;
   ns_t ca_free_ = 0.0;
+  ns_t global_io_free_ = 0.0;             // channel DQ, host path only
   ChannelStats stats_;
 
   HostStreamConfig host_;
   ns_t host_next_arrival_ = 0.0;
   uint64_t host_backlog_ = 0;
+  double host_credit_ = 0.0;
   std::vector<ns_t> host_arrival_times_;
 };
 

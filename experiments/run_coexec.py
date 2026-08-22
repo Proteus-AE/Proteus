@@ -19,11 +19,7 @@ from proteus_sim.dram import pimcore_bridge as pc
 
 
 def main():
-    if not pc.available():
-        print("cmake/g++ unavailable; skipping the co-execution study")
-        return
-    pc.build()
-    binary = os.path.join(pc.BUILD_DIR, "pimcore_coexec")
+    binary = pc.binary("pimcore_coexec")
     out = subprocess.run(
         [binary, "--config", pc.config_path("lpddr5x-8533"),
          "--rows", "48", "--vectors", "8"],

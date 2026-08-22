@@ -22,10 +22,8 @@ enum class CommandKind : uint8_t {
   PRE_AB,        // all-bank precharge
   ACT,           // single-bank activate (host path)
   RD,            // single-bank read (host path)
-  WR,            // single-bank write (host path)
   PRE,           // single-bank precharge
   MODE,          // connectivity mode-register update
-  REF_AB,        // explicit all-bank refresh (normally scheduler-driven)
   BARRIER,       // stream synchronization marker
   INVALID
 };
@@ -40,16 +38,6 @@ enum class ConnectivityMode : uint8_t {
 };
 
 const char* to_string(ConnectivityMode m);
-
-// Memory substrate families supported by the timing/power tables.
-enum class Substrate : uint8_t {
-  LPDDR5X_PIM,   // wire-bonded LPDDR die with per-bank PEs (Proteus)
-  HBM_PIM,       // TSV-stacked HBM with per-pseudo-channel bank PEs
-  GDDR6_AIM      // GDDR6 die with per-bank processing units
-};
-
-Substrate substrate_from_string(const std::string& s);
-const char* to_string(Substrate s);
 
 // Host/PIM arbitration policy for the shared channel (unified memory path).
 enum class ArbitrationPolicy : uint8_t {

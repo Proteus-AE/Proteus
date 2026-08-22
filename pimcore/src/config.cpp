@@ -158,4 +158,24 @@ ConfigNode ConfigNode::parse(const std::string& text) {
   return root;
 }
 
+std::string config_path(const std::string& config_root,
+                        const std::string& kind, const std::string& name,
+                        const std::string& option) {
+  if (name.empty())
+    throw std::runtime_error(option + " needs a name; expected one of the " +
+                             kind + " configurations in " + config_root + "/" +
+                             kind + "/");
+  const std::string path = config_root + "/" + kind + "/" + name + ".yaml";
+  std::ifstream probe(path);
+  if (!probe)
+    throw std::runtime_error("no " + kind + " configuration named '" + name +
+                             "' (" + option + "); expected " + path);
+  return path;
+}
+
+ConfigNode load_config(const std::string& config_root, const std::string& kind,
+                       const std::string& name, const std::string& option) {
+  return ConfigNode::load_file(config_path(config_root, kind, name, option));
+}
+
 }  // namespace pimcore

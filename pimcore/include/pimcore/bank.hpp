@@ -32,10 +32,19 @@ class Bank {
 
   // State transitions. Each returns the effective issue time after applying
   // this bank's local constraints (callers add bus/die/refresh constraints).
-  ns_t apply_act(ns_t t, int row, const TimingParams& p);
-  ns_t apply_read(ns_t t, const TimingParams& p);
-  ns_t apply_write(ns_t t, const TimingParams& p);
-  void apply_pre(ns_t t, const TimingParams& p);
+  ns_t apply_act(ns_t t, int row, const TimingParams& p,
+                 bool all_bank = false);
+  // `cadence` is the bank's own column cycle: the near-bank read path runs
+  // from the bank's I/O sense amplifiers straight into its co-located PE and
+  // never touches the shared bus, so its cycle is set by the connectivity
+  // mode rather than by tCCD_L.
+  ns_t apply_read(ns_t t, const TimingParams& p, ns_t cadence = 0.0);
+  // An all-bank column write is executed by the bank at the cadence of the
+  // mode in force, exactly as its reads are; `cadence` of zero selects the
+  // shared-bus column cycle a single-bank host write would take.
+  ns_t apply_write(ns_t t, const TimingParams& p, ns_t cadence = 0.0);
+  void apply_pre(ns_t t, const TimingParams& p,
+                 bool all_bank = false);
 
   // statistics
   uint64_t acts = 0;

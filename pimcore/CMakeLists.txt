@@ -12,9 +12,6 @@ add_library(pimcore_lib
   src/types.cpp
   src/config.cpp
   src/timing.cpp
-  src/substrates/lpddr5x_pim.cpp
-  src/substrates/hbm_pim.cpp
-  src/substrates/gddr6_aim.cpp
   src/bank.cpp
   src/channel.cpp
   src/trace.cpp
