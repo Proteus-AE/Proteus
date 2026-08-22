@@ -1,8 +1,0 @@
-[submodule "ext/ramulator2"]
-	path = ext/ramulator2
-	url = https://github.com/CMU-SAFARI/ramulator2.git
-	branch = main
-[submodule "ext/onnxim"]
-	path = ext/onnxim
-	url = https://github.com/PSAL-POSTECH/ONNXim.git
-	branch = master
