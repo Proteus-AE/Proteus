@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "proteus-sim"
-version = "1.0.0"
+version = "1.1.0"
 description = "Operator-level performance/energy simulator with a command-level LPDDR5X-PIM backend for the Proteus heterogeneous xPU+PIM LLM inference system"
 readme = "README.md"
 license = { text = "MIT" }

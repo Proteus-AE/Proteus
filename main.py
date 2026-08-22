@@ -16,6 +16,20 @@ from proteus_sim.workload import build_workload
 from proteus_sim.system import VARIANTS, ProteusSystem
 
 
+def format_counter(name, value):
+    """Render one counter in the unit its name implies."""
+    if not isinstance(value, float):
+        return str(value)
+    if "bytes" in name:
+        return f"{value / 1e6:.3f} MB" if value < 1e9 \
+            else f"{value / 1e9:.3f} GB"
+    if name.endswith("_flops"):
+        return f"{value / 1e9:.3f} GFLOP"
+    if abs(value) >= 1e6:
+        return f"{value:.4g}"
+    return f"{value:.4f}"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="ProteusSim")
     ap.add_argument("--system", default="proteus",
@@ -28,9 +42,15 @@ def main(argv=None):
     ap.add_argument("--ctx", type=int, default=None,
                     help="sustained context override (sets peak=avg=ctx)")
     ap.add_argument("--devices", type=int, default=None)
+    ap.add_argument("--theta", type=float, default=None,
+                    help="override the analytical crossover threshold "
+                         "F_PIM/BW_out (Sec. IV-D; nominal 32)")
+    ap.add_argument("--static", action="store_true",
+                    help="Proteus-Static: freeze the operator mapping at "
+                         "deployment time (Sec. V-C)")
     ap.add_argument("--dp", type=int, default=1, help="data-parallel replicas")
     ap.add_argument("--variant", default="full", choices=sorted(VARIANTS),
-                    help="Proteus incremental variant (Sec. V-C)")
+                    help="Proteus incremental variant (Sec. V-D)")
     ap.add_argument("--routing", default="expected", choices=["expected", "sampled"],
                     help="MoE routing: expectation under uniform gating, or "
                          "sampled per-iteration routing averaged over --iters")
@@ -100,14 +120,28 @@ def main(argv=None):
         print(f"error: unknown system '{args.system}' "
               f"(available: {', '.join(list_systems())})")
         return 2
+    if args.theta is not None and isinstance(sys_, ProteusSystem):
+        sys_.sched.theta = args.theta
     if args.dp > 1 and not isinstance(sys_, ProteusSystem):
         print("note: [PP,DP] hybrid parallelism is modeled for Proteus only; "
               "--dp is ignored for baseline systems")
 
+    # Proteus-Static freezes the schedule at the deployment-time reference
+    # the system configuration declares, not at the workload being run.
+    frozen = None
+    if args.static and isinstance(sys_, ProteusSystem):
+        ref = sys_.cfg["static_reference"]
+        frozen = sys_.deployment_plan(
+            build_workload(model, int(ref["concurrency"]), 0, 0,
+                           ctx_override=int(ref["context"])), args.devices)
+
     def one(seed):
         w = build_workload(model, args.batch, args.ctx_in, args.ctx_out,
                            routing=args.routing, seed=seed, ctx_override=args.ctx)
-        return w, sys_.simulate(w, devices=args.devices, dp=args.dp)
+        kw = dict(devices=args.devices, dp=args.dp)
+        if frozen is not None:
+            kw["frozen_plan"] = frozen
+        return w, sys_.simulate(w, **kw)
 
     if args.routing == "sampled" and model["moe"]["enabled"]:
         results = [one(args.seed + i) for i in range(args.iters)]
@@ -124,7 +158,8 @@ def main(argv=None):
             print(f"{args.system}/{args.model} b={args.batch}: {r.notes}"); return 1
         thr, tpj = r.throughput, r.tokens_per_joule
 
-    print(f"system            : {r.system} ({args.variant})")
+    label = args.variant + (", static mapping" if frozen is not None else "")
+    print(f"system            : {r.system} ({label})")
     print(f"model             : {model['name']}  batch={args.batch}  "
           f"ctx={w.ctx_avg} (peak {w.ctx_peak})")
     print(f"throughput        : {thr:,.0f} tokens/s")
@@ -137,20 +172,24 @@ def main(argv=None):
         if isinstance(sys_, ProteusSystem):
             print("\nderived machine parameters:")
             print(sys_.dmem.describe())
-            n, modes = sys_.sched.summary(r.placements)
-            print(f"\noperator placement ({len(r.placements)} operators): "
-                  f"xPU {n['xpu']}, PIM {n['pim']} "
-                  f"(direct {modes['direct']}, broadcast {modes['broadcast']}), "
-                  f"SFU {n['sfu']}")
-            print(f"crossover AI      : {sys_.sched.crossover_ai} "
-                  f"(AI_PIM={sys_.sched.ai_pim:.1f}, AI_xPU={sys_.sched.ai_xpu:.1f})")
+            c = r.counters
+            print(f"\nscheduled placement ({len(r.placements)} operator "
+                  f"groups): {c['direct_ops']} PIM direct, "
+                  f"{c['broadcast_ops']} PIM broadcast, "
+                  f"{c['xpu_weight_share'] * 100:.0f}% of the streamed "
+                  f"weight bytes on the xPU, {c['sched_remaps']} runtime "
+                  f"remappings")
+            print(f"crossover estimate: theta={sys_.sched.theta:g} "
+                  f"(AI_PIM={sys_.sched.ai_pim:.1f}, "
+                  f"AI_xPU={sys_.sched.ai_xpu:.1f})")
+            print(f"topology          : TP={r.counters['tp_width']} x "
+                  f"PP={r.counters['pipeline_groups']}, "
+                  f"{r.counters['layers_per_stage']} layers/stage, "
+                  f"collectives {r.counters['collective_ms']:.3f} ms/iter")
         if r.counters:
             print("\ncounters:")
             for k, v in r.counters.items():
-                if isinstance(v, float) and abs(v) > 1e6:
-                    print(f"  {k:<28}: {v/1e9:.2f} GB")
-                else:
-                    print(f"  {k:<28}: {v}")
+                print(f"  {k:<28}: {format_counter(k, v)}")
 
     if (args.engine == "detailed" or args.dump_timeline) and \
             isinstance(sys_, ProteusSystem) and r.alive:
@@ -165,9 +204,10 @@ def main(argv=None):
     if args.timeline and isinstance(sys_, ProteusSystem) and r.alive:
         from proteus_sim.fabric import CxlFabric
         c = r.counters
-        t_stage_ns = r.t_iter_ms * 1e6 * c["inflight"] / c["devices"]
+        groups = c["pipeline_groups"]
+        t_stage_ns = r.t_iter_ms * 1e6 / groups
         fab = CxlFabric(sys_.cfg["interconnect"])
-        ev = fab.iteration_timeline(c["devices"], t_stage_ns,
+        ev = fab.iteration_timeline(groups, t_stage_ns,
                                     c["activation_bytes_per_stage"])
         print("\npipeline timeline (one decode iteration):")
         print(CxlFabric.render(ev))

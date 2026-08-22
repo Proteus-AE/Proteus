@@ -49,7 +49,7 @@ module pe_cluster (
   wire [255:0] pe_data;
   wire [3:0]   fifo_afull;
 
-  bg_arbiter u_arb (
+  arbiter_4to1 u_arb (
       .clk(clk), .rst_n(rst_n), .mode_broadcast(mode_broadcast),
       .rd_valid(rd_valid & {4{~switch_busy}}),   // hold during reconfig
       .rd_grant(rd_grant),

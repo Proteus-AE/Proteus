@@ -1,24 +1,34 @@
-# Proteus
+# ProteusSim
 
-Simulation infrastructure for **Proteus**, a heterogeneous xPU +
-near-bank-PIM system for LLM inference, and the six baseline systems
-evaluated in the paper (DGX-A100, CXL-PNM, CENT, NeuPIMs, PAPI, PIMphony).
+Simulation infrastructure for **Proteus**, a scalable and adaptive
+heterogeneous xPU + near-bank-PIM system for LLM inference, and the six
+baseline systems it is compared against (DGX-A100, CXL-PNM, CENT, NeuPIMs,
+PAPI, PIMphony).
 
-Two layers:
+Three layers, each validated against the one below it:
 
 * an **operator-level system engine** resolves one steady-state decode
-  iteration: workload lowering, crossover scheduling, xPU-PIM co-execution,
-  pipeline parallelism, capacity-bounded in-flight batching, and
+  iteration -- workload lowering into per-matrix and per-expert operator
+  groups, the analytical crossover estimate and its runtime adaptation,
+  xPU/PIM co-execution, memory-hierarchy-aligned parallelism (tensor-parallel
+  groups inside a CXL switch domain, pipeline parallelism across them) with
+  its ring collectives, capacity-bounded in-flight batching, and
   activity-based energy;
-* a **command-level LPDDR5X-PIM backend** executes all-bank command traces
-  under the DRAM timing state (row buffers, tCCD_L bank-group buses,
-  tRRD/tFAW, refresh, PE operand FIFOs, direct/broadcast connectivity).
-  The sustained rates the system layer consumes are derived from and
-  cross-checked against this backend.
+* a **command-level LPDDR5X-PIM backend** executes all-bank command streams
+  under the DRAM timing state: per-bank row buffers, the bank-local near-bank
+  read path and its two column cadences, bank-group broadcast distribution,
+  tRRD/tFAW, refresh, PE operand FIFOs, mode switching, and command energy.
+  Every sustained rate the system layer consumes is derived in closed form
+  *and* measured here;
+* a **request-level serving driver** replays an arrival trace under KV
+  admission control and continuous batching, and reports per-token latency
+  and SLO attainment against offered load.
 
-Both layers exist twice: in Python (`proteus_sim/`) and in dependency-free
-C++17 (`pimcore/`). Every evaluation cell is cross-checked between the two
-(`experiments/run_sys_crosscheck.py`, `experiments/run_substrate.py`).
+Both the system layer and the memory backend exist twice -- in Python
+(`proteus_sim/`) and in dependency-free C++17 (`pimcore/`). The two read the
+same configuration tree, and every cell of the evaluation grid together with
+the derived variant, scalability and crossover tables is cross-checked
+between them.
 
 ## Building
 
@@ -27,18 +37,29 @@ Requirements: Python >= 3.9, CMake >= 3.16, a C++17 compiler.
 ```bash
 pip install -r requirements.txt        # pyyaml, matplotlib, numpy
 make core                              # C++ core (pimcore binaries)
+make traces                            # replayable kernel + request traces
+make test                              # all four test suites
 ```
 
-The C++ core is required: the substrate/co-execution studies, the
-system-layer cross-check, and the serving cross-check run its binaries.
+Both steps are prerequisites, not conveniences. The C++ core carries the
+substrate studies, the co-execution study and both cross-checks, and the
+experiment scripts abort naming the build step if its binaries are absent.
+The replayed traces are not shipped: `make traces` regenerates them from the
+seeded generators in `trace_gen/`, so what the serving experiments consume is
+produced on the machine that runs them.
 
-Optional components:
+Further components, each with its own toolchain requirement:
 
 ```bash
-make deps                  # ext/: Ramulator 2.0 + ONNXim (cross-checks;
-                           #   clones + builds, needs network and g++-12)
+make deps                  # ext/: Ramulator 2.0 + ONNXim at the revisions
+                           #   pinned in ext/VERSIONS (clones + builds,
+                           #   needs network); integration/ramulator2/
+                           #   carries the Proteus device model, the
+                           #   PIM-priority controller plugin and the
+                           #   trace-replay frontend
 pip install .[integration] # onnx package for the ONNXim cross-check
 make rtl                   # Verilog testbenches (needs iverilog)
+make -C rtl syn            # Design Compiler synthesis -> area report
 ```
 
 ## Quick start
@@ -50,13 +71,21 @@ python main.py --system proteus --model mixtral-8x7b --batch 32 --verbose
 # A baseline on the identical workload:
 python main.py --system neupims --model mixtral-8x7b --batch 32
 
-# Effectiveness-analysis variants (Sec. V-C):
+# Effectiveness-analysis variants (Sec. V-D) and Proteus-Static (Sec. V-C):
 python main.py --system proteus --model mixtral-8x7b --batch 32 --variant rd
+python main.py --system proteus --model mixtral-8x7b --batch 32 --static
 
-# Sampled MoE routing; pipeline timeline:
+# Perturb the analytical crossover threshold (Sec. V-E):
+python main.py --system proteus --model llama3-70b --batch 64 --theta 2
+
+# Multi-device: 64 devices = 8 tensor-parallel groups pipelined over layers
+python main.py --system proteus --model llama3-405b --batch 16 --ctx 32768 \
+    --devices 64 --timeline
+
+# Sampled MoE routing; per-layer substrate occupancy:
 python main.py --system proteus --model mixtral-8x7b --batch 32 \
     --routing sampled --iters 200
-python main.py --system proteus --model llama3-70b --batch 32 --timeline
+python main.py --system proteus --model llama3-70b --batch 32 --engine detailed
 
 # Operator graph after the fusion/annotation passes:
 python main.py --model mixtral-8x7b --dump-graph graph.json
@@ -67,75 +96,53 @@ python trace_gen/gen_trace.py --kernel skinny-gemm --rows 64 --vectors 8 \
 python main.py --replay-trace results/gemm.trace --pim-mode broadcast
 ```
 
-## Reproducing the paper's evaluation
-
-| Paper figure / claim | Command | Output (results/) |
-|---|---|---|
-| Fig. Overall (a)(b): throughput & energy efficiency | `python experiments/run_overall.py` | `throughput_*.csv`, `energyeff_*.csv` |
-| Fig. Breakdown: Base/+AS/+RD/+OF/+EC | `python experiments/run_breakdown.py` | `effectiveness_breakdown.csv` |
-| Fig. Sensitivity: context & batch sweeps | `python experiments/run_sensitivity.py` | `sensitivity_*.csv` |
-| Fig. Scalability: devices & [PP,DP] | `python experiments/run_scalability.py` | `scalability_*.csv` |
-| Sec. IV-B/C mechanisms at command level | `python experiments/run_microbench.py` | `microbench_*.csv` |
-| Runtime adaptation under continuous batching | `python experiments/run_serving.py` | `serving_dynamics_*.csv` |
-| Substrate comparison (C1/C2/C3) at command level | `python experiments/run_substrate.py` | `substrate_comparison.csv` |
-| Host/PIM arbitration policy study | `python experiments/run_coexec.py` | `coexec_policies.csv` |
-| C++ vs Python cross-check (all tables) | `python experiments/run_sys_crosscheck.py` | `sys_crossvalidation.csv` |
-| Integrated xPU+PIM co-simulation | `python experiments/run_integrated.py` | `integrated_*.csv` |
-| Host path vs Ramulator 2.0 (ext/) | `python experiments/run_ramulator_xcheck.py` | `ramulator_xcheck.csv` |
-| xPU tiles vs ONNXim (ext/) | `python experiments/run_onnxim_xcheck.py` | `onnxim_xcheck.csv` |
-| All figures (PNG) | `python experiments/plot_all.py` | `figures/*.png` |
-
-Everything at once (about three minutes), including both test suites:
-
-```bash
-make all        # = make core + bash scripts/run_all.sh
-```
-
-The two external cross-checks report SKIPPED unless `make deps` has been
-run (they compare the built-in backends against independent simulators;
-no paper figure depends on them).
 
 ## Repository layout
 
 ```
 configs/
-  models/        llama3-70b, mixtral-8x7b, switch-26b, deepseek-v2-lite
+  models/        llama3-70b, llama3-405b, mixtral-8x7b, switch-26b,
+                 deepseek-v2-lite
   systems/       proteus + six baselines (all mechanism parameters)
   memory/        LPDDR5X-8533 organization, DRAM timing, energy/bit
+  area/          post-synthesis cell areas and the process scaling
+  validation/    reference points the machine model is checked against
 proteus_sim/
-  workload.py    model -> per-layer operator list (traffic/FLOP accounting)
+  workload.py    model -> per-matrix / per-expert operator groups
   compiler/      operator-graph IR, lowering, fusion & AI-annotation passes
-  scheduler.py   crossover model, placement, PIM-mode selection
-  memory.py      analytical sustained-rate derivation
-  system.py      Proteus timing engine, variants, pipeline, energy
-  serving.py     closed-loop continuous-batching request simulation
+  scheduler.py   crossover estimate, placement, connectivity, instrumentation
+  memory.py      LPDDR5X-PIM machine model (organization -> sustained rates)
+  system.py      Proteus timing engine: topology, scheduling, energy
+  fabric.py      CXL 3.0 fabric: ring collectives and pipeline timeline
+  serving.py     open-loop SLO driver + closed-loop adaptation driver
+  engine.py      per-layer substrate timeline of one pipeline stage
   xpucore/       tile-level systolic xPU engine (+ optional ONNX front-end)
-  fabric.py      CXL 3.0 fabric + iteration timeline
-  dram/          command-level PIM backend (banks, buses, refresh, PEs,
-                 mode switching, xPU slot stealing, command energy)
+  dram/          command-level PIM backend (banks, near-bank datapath,
+                 broadcast distribution, refresh, PEs, command energy)
   baselines/     gpu, cxl_pnm, cent, neupims, papi, pimphony
-trace_gen/       kernel/request trace generation CLIs (Python; the C++
-                 counterpart is pimcore_tracegen)
+trace_gen/       kernel and request trace generation CLIs
 request_traces/  replayable request-arrival traces for the serving layer
 pimcore/         C++17 core: memory backend, system layer, serving engine,
                  trace/host-stream generation (see its README)
 ext/             external simulators (Ramulator 2.0, ONNXim; make deps)
 integration/     Ramulator 2.0 patches (device model, controller plugin,
-                 trace frontend); optional, see its README
+                 trace frontend); see its README
 rtl/             synthesizable Verilog + testbenches + DC synthesis scripts
-experiments/     per-figure scripts, microbenchmarks, plotting
+experiments/     per-figure scripts, microbenchmarks, cross-checks, plotting
 tests/           system-level and backend test suites
 docs/            DRAM model notes, API reference
 ```
 
-`tests/` covers physical bounds, monotonicity, OOM accounting, crossover
-closure, streaming efficiency, broadcast reuse, trace round-trip, and the
+`tests/` covers the derived organization against Table III, physical bounds,
+monotonicity, OOM accounting, crossover closure and threshold sensitivity,
+collective volume, frozen-mapping regression, streaming efficiency, broadcast
+reuse, co-execution headroom, trace round-trip, scheduler overhead and the
 compiler passes. `AE.md` maps paper claims to experiments.
 
 ## Documentation
 
-* `docs/dram-model.md` -- the command-level backend and its cross-validation
-  against the analytical layer.
+* `docs/dram-model.md` -- the command-level backend, the near-bank datapath,
+  and its cross-validation against the analytical layer.
 * `docs/api.md` -- Python API reference.
 
 ## License

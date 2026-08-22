@@ -68,7 +68,7 @@ def attention_trace(ctx_tokens, kv_bytes_per_token_layer, group_size,
     """Decode attention of one head-group over its resident KV slice.
 
     The KV cache of `ctx_tokens` tokens is striped over the banks of
-    `channels_per_head` channels (Fig. "Data Placement"). GQA/MLA supplies
+    ``channels_per_head`` channels (Fig. 7). GQA/MLA supplies
     `group_size` queries sharing the same KV operand:
       direct    -> the KV slice is re-streamed once per query,
       broadcast -> ceil(group_size/fanout) passes.

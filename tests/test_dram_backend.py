@@ -21,39 +21,82 @@ MEM = load_memory("lpddr5x-8533")
 ROWS = 32
 
 
-def _peak():
-    bgs = MEM["dies_per_channel"] * MEM["bankgroups_per_die"]
-    return bgs * 32 / (MEM["tCCD_L_ns"] / 2.0) * 1e9
+def _channel(mode):
+    return PimChannel(MEM, mode)
+
+
+def test_organization_matches_table_iii():
+    """The command-level channel must carry the organization of Sec. V-A:
+    one 32Gb die per x16 channel, four bank groups of four banks, one PE per
+    bank, and the two column cadences of Fig. 9."""
+    ch = _channel("direct")
+    assert ch.n_banks == 16 and ch.n_bg == 4
+    assert len(ch.pes) == ch.n_banks
+    assert abs(ch.column_cadence("direct") - MEM["tCCD_L_ns"] / 2.0) < 1e-9
+    assert abs(ch.column_cadence("broadcast") - MEM["tCCD_L_ns"]) < 1e-9
+    channels = MEM["packages_per_device"] * MEM["channels_per_package"]
+    assert abs(ch.peak_bw("direct") * channels / 16.384e12 - 1) < 1e-6
+    assert abs(ch.peak_bw("broadcast") * channels / 8.192e12 - 1) < 1e-6
 
 
 def test_streaming_matches_analytical_layer():
     """Sustained all-bank streaming efficiency measured at command level must
-    agree with the 0.80 constant used by the analytical layer (within 5%)."""
-    st = PimChannel(MEM, "direct").execute(gemv_trace(ROWS, MEM))
-    eff = st.sustained_bw() / _peak()
-    ana = derive(MEM).internal_eff
-    assert abs(eff - ana) / ana < 0.05, f"measured {eff:.3f} vs {ana:.2f}"
+    agree with the closed form the analytical layer uses, in both
+    connectivity modes (within 5%)."""
+    d = derive(MEM)
+    st = _channel("direct").execute(gemv_trace(ROWS, MEM))
+    eff = st.sustained_bw() / _channel("direct").peak_bw("direct")
+    assert abs(eff - d.internal_eff) / d.internal_eff < 0.05, \
+        f"direct: measured {eff:.3f} vs {d.internal_eff:.3f}"
     assert st.row_hits == st.n_rd_burst          # streaming = all row hits
+
+    sb = _channel("broadcast").execute(
+        skinny_gemm_trace(ROWS, 4, MEM, mode="broadcast"))
+    eff_b = sb.sustained_bw() / _channel("broadcast").peak_bw("broadcast")
+    assert abs(eff_b - d.broadcast_eff) / d.broadcast_eff < 0.05, \
+        f"broadcast: measured {eff_b:.3f} vs {d.broadcast_eff:.3f}"
 
 
 def test_broadcast_operand_reuse():
-    """Broadcasting must deliver ~min(n,4)-fold reuse (Sec. IV-C)."""
-    for n, expect in [(2, 2.0), (4, 4.0), (8, 4.0), (16, 4.0)]:
-        td = PimChannel(MEM, "direct").execute(
+    """Four-way inter-PE reuse and the cadence that comes with it.
+
+    Every PE assembles one burst from every bank of its group into a FIFO
+    whose depth matches the BG fan-in, and a 4:1 selector drains them into the
+    MAC array one issue at a time; the bank column cadence therefore matches
+    the fan-in. A skinny-GEMM of n vectors costs n passes in direct mode
+    against ceil(n/fanout) passes at the broadcasting cadence, and the reuse
+    width bounds the benefit: two vectors gain nothing (Sec. IV-C)."""
+    import math
+    d = derive(MEM)
+    ratio_eff = d.broadcast_eff / d.internal_eff
+    for n in (2, 4, 8, 16):
+        td = _channel("direct").execute(
             skinny_gemm_trace(ROWS, n, MEM, mode="direct")).time_ns
-        tb = PimChannel(MEM, "broadcast").execute(
+        tb = _channel("broadcast").execute(
             skinny_gemm_trace(ROWS, n, MEM, mode="broadcast")).time_ns
-        assert abs(td / tb - expect) / expect < 0.10, (n, td / tb)
+        expect = n / (2.0 * math.ceil(n / d.fanout)) * ratio_eff
+        assert abs(td / tb - expect) / expect < 0.06, (n, td / tb, expect)
 
 
 def test_coexecution_headroom():
-    """Iso-work: broadcasting must free ~3/4 of the channel time that direct
-    mode occupies, exposing memory-service slots to the xPU (Sec. IV-B/C)."""
-    td = PimChannel(MEM, "direct").execute(
-        skinny_gemm_trace(ROWS, 8, MEM, mode="direct")).time_ns
-    tb = PimChannel(MEM, "broadcast").execute(
-        skinny_gemm_trace(ROWS, 8, MEM, mode="broadcast")).time_ns
-    assert 0.70 < 1 - tb / td < 0.80
+    """A bank serves either its local PE or the channel's global I/O in a
+    column cycle. Direct mode drives every bank at its minimum column cycle
+    and returns nothing to the xPU; the broadcasting cadence frees enough
+    slots to cover the channel's share of the 1 TB/s external interface --
+    the memory-service opportunity of Sec. IV-C. These measurements are the
+    co-execution constants of configs/systems/proteus.yaml."""
+    channels = MEM["packages_per_device"] * MEM["channels_per_package"]
+    ext_per_channel = MEM["external_bw_per_device_tbps"] * 1e12 / channels
+    out = {}
+    for mode, n in (("direct", 8), ("broadcast", 8)):
+        ch = _channel(mode)
+        ch.attach_xpu_stream()
+        st = ch.execute(skinny_gemm_trace(ROWS, n, MEM, mode=mode))
+        out[mode] = (st, st.xpu_bw(32))
+    assert out["direct"][1] == 0.0
+    assert out["broadcast"][1] > 0.5 * ext_per_channel
+    # iso-work, so the freed time is real: broadcasting also finishes sooner
+    assert out["broadcast"][0].time_ns < out["direct"][0].time_ns
 
 
 def test_mac_counts():

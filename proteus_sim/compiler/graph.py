@@ -33,9 +33,6 @@ class OpGraph:
         self.nodes.pop(name)
         self.order.remove(name)
 
-    def consumers(self, name):
-        return [n for n in self.iter_nodes() if name in n.inputs]
-
     def iter_nodes(self):
         return [self.nodes[n] for n in self.order]
 

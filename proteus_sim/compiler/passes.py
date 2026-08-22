@@ -11,9 +11,6 @@
 """
 
 
-FUSABLE_TAILS = {"elementwise", "reduce"}
-
-
 def fuse_elementwise(g):
     """Fold every element-wise consumer chain into its producing operator."""
     changed = True

@@ -19,6 +19,9 @@ PRE = "PRE"
 MODE = "MODE"            # connectivity mode register update
 BARRIER = "BARRIER"      # trace-level synchronization marker
 
+#: the two bank-to-PE connectivity modes a MODE command can select
+CONNECTIVITY_MODES = ("direct", "broadcast")
+
 
 @dataclass
 class Command:
@@ -27,6 +30,14 @@ class Command:
     col: int = 0
     bank: int = -1        # target bank for single-bank commands (-1 = all)
     arg: str = ""         # MODE target: 'direct' | 'broadcast'
+
+    def __post_init__(self):
+        # The mode register selects one of two hardwired datapaths, so an
+        # unrecognized target is a malformed command, not a no-op.
+        if self.kind == MODE and self.arg not in CONNECTIVITY_MODES:
+            raise ValueError(
+                f"unknown connectivity mode {self.arg!r} "
+                f"(expected {' or '.join(CONNECTIVITY_MODES)})")
 
     def __repr__(self):
         t = f"{self.kind} r{self.row} c{self.col}"

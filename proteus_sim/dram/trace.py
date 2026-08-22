@@ -11,10 +11,19 @@ Text format, one command per line (AiM-style command streams):
 
 Traces produced by ``trace_gen`` can be replayed with
 ``python main.py --replay-trace <file>`` or consumed programmatically by
-``PimChannel.execute(read_trace(path))``.
+``PimChannel.execute(read_trace(path))``. A line the reader cannot parse
+raises ``TraceError`` naming the file, the line number and what was expected.
 """
 from .commands import (Command, ACT_AB, RDMAC_AB, WR_AB, PRE_AB, ACT, RD,
                        PRE, MODE, BARRIER)
+
+#: operand count of every command kind the text format accepts
+OPERANDS = {MODE: 1, ACT_AB: 1, RDMAC_AB: 2, WR_AB: 2, PRE_AB: 0,
+            ACT: 3, RD: 3, PRE: 3, BARRIER: 0}
+
+
+class TraceError(ValueError):
+    """A trace line is malformed; the message names the file and the line."""
 
 
 def write_trace(path, commands):
@@ -36,29 +45,41 @@ def write_trace(path, commands):
                 f.write("BARRIER\n")
 
 
+def _parse_line(tok, where):
+    """One trace line, already split into tokens, as a Command."""
+    k = tok[0]
+    if k not in OPERANDS:
+        raise TraceError(f"{where}: unknown command {k!r} "
+                         f"(expected one of {', '.join(sorted(OPERANDS))})")
+    args = tok[1:]
+    if len(args) != OPERANDS[k]:
+        raise TraceError(f"{where}: {k} takes {OPERANDS[k]} operand(s), "
+                         f"got {len(args)}")
+    if k == MODE:
+        try:
+            return Command(MODE, arg=args[0])
+        except ValueError as e:
+            raise TraceError(f"{where}: {e}") from None
+    try:
+        nums = [int(a) for a in args]
+    except ValueError:
+        raise TraceError(f"{where}: {k} operands must be integers, got "
+                         f"{' '.join(args)!r}") from None
+    if k in (ACT, RD, PRE):
+        return Command(k, row=nums[0], col=nums[1], bank=nums[2])
+    if k in (RDMAC_AB, WR_AB):
+        return Command(k, row=nums[0], col=nums[1])
+    if k == ACT_AB:
+        return Command(ACT_AB, row=nums[0])
+    return Command(k)
+
+
 def read_trace(path):
     out = []
     with open(path) as f:
-        for ln in f:
+        for lineno, ln in enumerate(f, start=1):
             tok = ln.split()
             if not tok or tok[0].startswith("#"):
                 continue
-            k = tok[0]
-            if k == "MODE":
-                out.append(Command(MODE, arg=tok[1]))
-            elif k == "ACT_AB":
-                out.append(Command(ACT_AB, row=int(tok[1])))
-            elif k == "RDMAC_AB":
-                out.append(Command(RDMAC_AB, row=int(tok[1]), col=int(tok[2])))
-            elif k == "WR_AB":
-                out.append(Command(WR_AB, row=int(tok[1]), col=int(tok[2])))
-            elif k == "PRE_AB":
-                out.append(Command(PRE_AB))
-            elif k in (ACT, RD, PRE):
-                out.append(Command(k, row=int(tok[1]), col=int(tok[2]),
-                                   bank=int(tok[3])))
-            elif k == "BARRIER":
-                out.append(Command(BARRIER))
-            else:
-                raise ValueError(f"bad trace line: {ln!r}")
+            out.append(_parse_line(tok, f"{path}:{lineno}"))
     return out
