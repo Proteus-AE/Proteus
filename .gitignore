@@ -1,4 +1,10 @@
 __pycache__/
 *.pyc
-results/
 .pytest_cache/
+results/
+rtl/reports/
+rtl/netlist/
+rtl/build_*.vvp
+pimcore/build/
+ext/ramulator2/
+ext/onnxim/
