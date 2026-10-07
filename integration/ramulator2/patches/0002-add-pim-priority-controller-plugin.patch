@@ -1,0 +1,103 @@
+Add the ProteusPIMSched controller plugin (PIM-priority all-bank
+scheduling, host gap-stealing, FIFO-drain gating of MODE).
+
+New files only; applies to any Ramulator 2.0 tree.
+---
+diff --git a/src/dram_controller/impl/plugin/proteus_pim_sched.cpp b/src/dram_controller/impl/plugin/proteus_pim_sched.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/dram_controller/impl/plugin/proteus_pim_sched.cpp
+@@ -0,0 +1,93 @@
++#include <deque>
++
++#include "base/base.h"
++#include "dram_controller/controller.h"
++#include "dram_controller/plugin.h"
++
++namespace Ramulator {
++
++// Controller plugin implementing the Proteus PIM arbitration of the
++// command-level backend (proteus_sim/dram/channel.py, pimcore channel.cpp):
++//
++//   * PIM kernels run as lockstep all-bank command groups (ACTab .. RDMAC*
++//     .. PREab) that own the bank-group data buses while active;
++//   * host (xPU) column commands steal bus slots opportunistically -- they
++//     issue only into gaps where every timing constraint of the in-flight
++//     PIM group already forces idleness (gap-stealing, PIM-priority);
++//   * MODE (datapath reconfiguration) is admitted only once the per-bank
++//     operand FIFOs have drained, i.e. no RDMAC issued in the last
++//     drain-window cycles.
++class ProteusPIMSched : public IControllerPlugin, public Implementation {
++  RAMULATOR_REGISTER_IMPLEMENTATION(
++      IControllerPlugin, ProteusPIMSched, "ProteusPIMSched",
++      "PIM-priority all-bank scheduling with host gap-stealing.")
++
++ private:
++  IDRAM* m_dram = nullptr;
++
++  int m_cmd_rdmac = -1;
++  int m_cmd_rdmacb = -1;
++  int m_cmd_wrab = -1;
++  int m_cmd_mode = -1;
++
++  // FIFO-drain bookkeeping for MODE admission.
++  Clk_t m_last_pim_col_clk = 0;
++  int m_fifo_drain_ck = 0;
++
++  // Statistics
++  size_t s_pim_groups = 0;
++  size_t s_host_stolen_slots = 0;
++  size_t s_mode_switches = 0;
++  size_t s_mode_stalled_ck = 0;
++
++ public:
++  void init() override {
++    m_fifo_drain_ck = param<int>("fifo_drain_ck").default_val(16);
++  }
++
++  void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
++    m_dram = m_ctrl->m_dram;
++    m_cmd_rdmac = m_dram->m_commands("RDMAC");
++    m_cmd_rdmacb = m_dram->m_commands("RDMACb");
++    m_cmd_wrab = m_dram->m_commands("WRab");
++    m_cmd_mode = m_dram->m_commands("MODE");
++
++    register_stat(s_pim_groups).name("pim_command_groups");
++    register_stat(s_host_stolen_slots).name("host_stolen_slots");
++    register_stat(s_mode_switches).name("mode_switches");
++    register_stat(s_mode_stalled_ck).name("mode_stall_cycles");
++  }
++
++  void update(bool request_found, ReqBuffer::iterator& req_it) override {
++    if (!request_found) return;
++
++    const Request& req = *req_it;
++    int cmd = req.command;
++
++    if (cmd == m_cmd_mode) {
++      // Hold MODE until the operand FIFOs are provably empty: no PIM
++      // column command in the last fifo_drain_ck cycles.
++      if (m_ctrl->m_clk - m_last_pim_col_clk < (Clk_t)m_fifo_drain_ck) {
++        s_mode_stalled_ck++;
++        request_found = false;   // veto this issue slot
++        return;
++      }
++      s_mode_switches++;
++      return;
++    }
++
++    if (cmd == m_cmd_rdmac || cmd == m_cmd_rdmacb || cmd == m_cmd_wrab) {
++      m_last_pim_col_clk = m_ctrl->m_clk;
++      if (req.is_first_command) s_pim_groups++;
++      return;
++    }
++
++    // Anything else is a host-path column/row command. Under PIM priority
++    // it reaches this point only when the PIM group cannot issue in this
++    // cycle, i.e. the slot was stolen from an enforced PIM gap.
++    if (m_ctrl->m_clk - m_last_pim_col_clk < (Clk_t)m_fifo_drain_ck)
++      s_host_stolen_slots++;
++  }
++};
++
++}  // namespace Ramulator

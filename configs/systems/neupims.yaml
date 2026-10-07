@@ -1,0 +1,47 @@
+# NeuPIMs baseline (ASPLOS'24): heterogeneous NPU + HBM-PIM with dual row
+# buffers and sub-batch interleaving, enabling concurrent NPU GEMM and PIM
+# attention. Normalized to the same xPU compute throughput as Proteus (V-A).
+name: NeuPIMs
+kind: neupims
+devices: 8
+hbm_capacity: 256.0e+9             # 8 x 32 GB HBM-PIM stacks
+hbm_bw_aggregate: 16.0e+12
+# Sec. V-A: heterogeneous systems match Proteus's aggregate xPU throughput.
+xpu_flops_aggregate: 2496.0e+12    # 8 x 312 TFLOPS
+usable_fraction: 0.90
+# Ratio of internal (all-bank PIM) to external HBM bandwidth: every bank of
+# a stack streams concurrently, giving 256 TB/s of internal bandwidth over
+# the 16 TB/s external interface (Table IV).
+pim_internal_mult: 16.0
+pim_stream_efficiency: 0.80
+
+# Sustained utilization of the NPU weight-GEMM path. The work reports 64.9%
+# NPU utilization for its sub-batch-interleaved schedule (GPT3-30B, batch
+# 256, ShareGPT); its 85.4% figure is whole-system bandwidth utilization and
+# already contains the interleaved PIM attention traffic, which this model
+# charges separately.
+weight_stream: 0.649
+attention_xpu_eff: 0.60            # NPU fallback path efficiency [ASSUME]
+overlap_overhead: 1.02             # sub-batch scheduling overhead [ASSUME]
+
+energy:
+  npu_busy_w: 250.0
+  npu_idle_w: 80.0
+  pim_pe_w_per_device: 10.0
+  static_w: 150.0
+  hbm_pj_per_bit: 3.9          # HBM external access energy
+  # The busy/idle figures above are accelerator-die power; the HBM stacks
+  # draw their own background power, charged per unit of resident capacity.
+  background_w_per_gb: 1.5
+  background_idle_factor: 0.3
+  hbm_pim_int_pj_per_bit: 2.5
+
+# Tensor-parallel collectives. Every evaluated system distributes each layer
+# over its eight devices and therefore pays two ring AllReduces per
+# transformer block; the cost is charged from the device's own interconnect.
+# NVLink-class accelerator fabric [ASSUME]
+interconnect:
+  kind: nvlink-class
+  link_bytes_per_s_per_dir: 300.0e+9
+  end_to_end_latency_ns: 700
+tp_collectives_per_layer: 2

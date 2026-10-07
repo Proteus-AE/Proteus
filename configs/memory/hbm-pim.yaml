@@ -1,0 +1,99 @@
+# HBM2E-class stacked DRAM with per-bank PEs behind a fixed one-to-one
+# datapath (the C2 substrate of the near-bank comparison, and the substrate
+# NeuPIMs and PAPI build on).
+#
+# Device organization:
+#   1 device  = 8 stacks
+#   1 stack   = 16 x64 pseudo-channels                    -> 4 GB / stack
+#   1 channel = one pseudo-channel slice = 4 bank groups x 4 banks
+#   1 bank    = one 16-lane FP16 MAC PE, no operand FIFO
+# giving 128 pseudo-channels, 512 bank groups, 2048 banks and 32 GB per
+# device -- the per-device capacity and external rate the heterogeneous
+# baselines of configs/systems/{neupims,papi}.yaml are configured with.
+#
+# The datapath is fixed one-to-one: a bank readout reaches its own PE and
+# nothing else, which is the property the substrate comparison isolates.
+name: HBM-PIM
+substrate: hbm-pim
+data_rate_mtps: 4000           # MT/s per pin (HBM2E-class speed bin)
+io_width: 64                   # x64 pseudo-channel
+burst_length: 4                # BL4 -> 32 B per burst, one 16-lane MAC issue
+packages_per_device: 8         # stacks
+channels_per_package: 16       # pseudo-channels per stack
+dies_per_channel: 1            # one pseudo-channel slice
+bankgroups_per_die: 4
+banks_per_bankgroup: 4
+capacity_per_package_gb: 4     # 16 pseudo-channels x 256 MB
+
+# DRAM core timing (ns) -- HBM2E-class values: wider prefetch and a shorter
+# row cycle than the LPDDR die, at a lower per-pin rate.
+tRCD_ns: 14.0
+tRP_ns: 14.0
+tRAS_ns: 34.0
+tRC_ns: 48.0
+tCCD_L_ns: 2.0                 # same-BG column-to-column (shared BG bus)
+tCCD_S_ns: 1.0                 # different-BG column-to-column
+tRRD_L_ns: 4.0                 # same-BG ACT-to-ACT
+tRRD_S_ns: 2.0                 # different-BG ACT-to-ACT
+tFAW_ns: 12.0                  # four-ACT window per die (single-bank ACTs only)
+tWR_ns: 16.0
+tRTP_ns: 5.0
+tREFI_ns: 3900.0               # all-bank refresh interval
+tRFCab_ns: 350.0               # all-bank refresh cycle time
+row_bytes: 1024                # per-bank row buffer
+tWTR_ns: 8.0                   # write-to-read turnaround within a bank
+ca_cmd_ns: 0.5                 # command/address bus occupancy per command
+
+# Near-bank column cycle. Like every near-bank part this substrate reads its
+# banks over a bank-private path rather than through the bank-group I/O, so
+# its column-to-column cycle is shorter than a host read's; the value below
+# is the one the stack's published all-bank internal bandwidth implies
+# (2048 banks x 32 B / 2 ns = 32 TB/s). What it lacks is one-to-many
+# connectivity: `broadcast_fanout` is 1, so a readout serves exactly one PE
+# and there is no operand reuse to amortize it.
+tCCD_PIM_ns: 2.0
+
+# All-bank PIM command constraints. A single all-bank command is provisioned
+# as one operation by the device and is therefore not subject to tRRD/tFAW,
+# which bound the controller's ability to stagger *independent* activations.
+allbank:
+  act_rcd_ns: 14.0             # ACT_AB -> first RDMAC_AB
+  ras_ns: 34.0                 # ACT_AB -> PRE_AB
+  rp_ns: 14.0                  # PRE_AB -> next ACT_AB
+  faw_exempt: true
+
+# Per-command energy for the command-level power counters.
+command_energy_pj:
+  act_pre: 800.0               # one ACT+PRE pair (row energy, per bank)
+  rd_burst_array: 640.0        # 32 B array read (2.5 pJ/bit) at the local PE
+  wr_burst_array: 680.0        # 32 B array write
+  rd_burst_io: 360.0           # additional TSV + base-die I/O when leaving
+  mac_op: 18.0                 # one 16-lane FP16 MAC issue
+  mode_switch: 40.0            # per-channel mode-register update
+  refresh_ab: 24000.0          # all-bank refresh event (per die)
+
+# Near-bank PE
+pe_lanes: 16                   # FP16 MAC lanes -> 32 B of matrix operand
+pe_freq_ghz: 1.0
+pe_operand_fifo: 1             # no operand buffering in the fixed datapath
+pe_pipeline_eff: 0.90          # issue/drain overhead of the MAC pipeline
+broadcast_fanout: 1            # one-to-one connectivity only
+
+# Datasheet-nominal aggregates the derivation is checked against:
+# 2048 banks x 32 B / 2 ns and 2048 x 16 lanes x 2 FLOP @ 1 GHz.
+nominal_internal_bw_tbps: 32.0
+nominal_pe_tflops: 64.0
+
+# Short-payload effect (identical to every other substrate; the derate is a
+# property of the serving stack, not of the device -- see configs/common.yaml).
+short_payload:
+  d_model_threshold: 1024
+  system_efficiency: 0.65
+  pim_cmd_efficiency: 1.00
+
+# External interface: 8 stacks x 256 GB/s.
+external_bw_per_device_tbps: 2.0
+ext_bus_efficiency: 0.98
+energy_pj_per_bit:
+  external: 3.9                # array read plus TSV/base-die I/O
+  near_bank: 2.5               # terminates at bank-local PE
