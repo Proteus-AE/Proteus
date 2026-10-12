@@ -1,0 +1,99 @@
+# GDDR6-class graphics DRAM with per-bank processing units behind a fixed
+# one-to-one datapath (the C3 substrate of the near-bank comparison, and the
+# substrate CENT builds on).
+#
+# Device organization:
+#   1 device  = 16 packages
+#   1 package = 2 x16 channels                            -> 1 GB / package
+#   1 channel = one die = 4 bank groups x 4 banks
+#   1 bank    = one 16-lane FP16 MAC unit, no operand FIFO
+# giving 32 channels, 128 bank groups, 512 banks and 16 GB per device -- the
+# per-device capacity and external rate configs/systems/cent.yaml is
+# configured with.
+#
+# High-speed signaling gives this substrate the largest I/O energy of the
+# three; its bank-to-PE connectivity is fixed one-to-one.
+name: GDDR6-AiM
+substrate: gddr6-aim
+data_rate_mtps: 16000          # MT/s per pin
+io_width: 16                   # x16 channel, two per package
+burst_length: 16               # BL16 -> 32 B per burst, one 16-lane MAC issue
+packages_per_device: 16
+channels_per_package: 2
+dies_per_channel: 1
+bankgroups_per_die: 4
+banks_per_bankgroup: 4
+capacity_per_package_gb: 1     # 2 channels x 512 MB
+
+# DRAM core timing (ns) -- GDDR6-class values: short row cycle, dense
+# refresh, and wide ACT spacing.
+tRCD_ns: 14.0
+tRP_ns: 14.0
+tRAS_ns: 28.0
+tRC_ns: 42.0
+tCCD_L_ns: 2.0                 # same-BG column-to-column (shared BG bus)
+tCCD_S_ns: 1.0                 # different-BG column-to-column
+tRRD_L_ns: 6.0                 # same-BG ACT-to-ACT
+tRRD_S_ns: 4.0                 # different-BG ACT-to-ACT
+tFAW_ns: 24.0                  # four-ACT window per die (single-bank ACTs only)
+tWR_ns: 16.0
+tRTP_ns: 4.0
+tREFI_ns: 1900.0               # all-bank refresh interval
+tRFCab_ns: 120.0               # all-bank refresh cycle time
+row_bytes: 2048                # per-bank row buffer
+tWTR_ns: 6.0                   # write-to-read turnaround within a bank
+ca_cmd_ns: 0.5                 # command/address bus occupancy per command
+
+# Near-bank column cycle. Like every near-bank part this substrate reads its
+# banks over a bank-private path rather than through the bank-group I/O, so
+# its column-to-column cycle is shorter than tCCD_L; the value below is the
+# one the device's published all-bank internal bandwidth implies (512 banks
+# x 32 B / 1 ns = 16 TB/s). What it lacks is one-to-many connectivity:
+# `broadcast_fanout` is 1, so a readout serves exactly one PE and there is
+# no operand reuse to amortize it.
+tCCD_PIM_ns: 1.0
+
+# All-bank PIM command constraints. A single all-bank command is provisioned
+# as one operation by the device and is therefore not subject to tRRD/tFAW,
+# which bound the controller's ability to stagger *independent* activations.
+allbank:
+  act_rcd_ns: 14.0             # ACT_AB -> first RDMAC_AB
+  ras_ns: 28.0                 # ACT_AB -> PRE_AB
+  rp_ns: 14.0                  # PRE_AB -> next ACT_AB
+  faw_exempt: true
+
+# Per-command energy for the command-level power counters.
+command_energy_pj:
+  act_pre: 950.0               # one ACT+PRE pair (row energy, per bank)
+  rd_burst_array: 900.0        # 32 B array read (3.5 pJ/bit) at the local PE
+  wr_burst_array: 940.0        # 32 B array write
+  rd_burst_io: 1200.0          # additional high-speed signaling when leaving
+  mac_op: 18.0                 # one 16-lane FP16 MAC issue
+  mode_switch: 40.0            # per-channel mode-register update
+  refresh_ab: 15000.0          # all-bank refresh event (per die)
+
+# Near-bank PE
+pe_lanes: 16                   # FP16 MAC lanes -> 32 B of matrix operand
+pe_freq_ghz: 1.0
+pe_operand_fifo: 1             # no operand buffering in the fixed datapath
+pe_pipeline_eff: 0.90          # issue/drain overhead of the MAC pipeline
+broadcast_fanout: 1            # one-to-one connectivity only
+
+# Datasheet-nominal aggregates the derivation is checked against:
+# 512 banks x 32 B / 2 ns and 512 x 16 lanes x 2 FLOP @ 1 GHz.
+nominal_internal_bw_tbps: 16.0
+nominal_pe_tflops: 16.0
+
+# Short-payload effect (identical to every other substrate; the derate is a
+# property of the serving stack, not of the device -- see configs/common.yaml).
+short_payload:
+  d_model_threshold: 1024
+  system_efficiency: 0.65
+  pim_cmd_efficiency: 1.00
+
+# External interface: 32 channels x 32 GB/s.
+external_bw_per_device_tbps: 1.0
+ext_bus_efficiency: 0.98
+energy_pj_per_bit:
+  external: 8.2                # array read plus high-speed signaling
+  near_bank: 3.5               # terminates at bank-local MAC unit

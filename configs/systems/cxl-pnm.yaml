@@ -1,0 +1,40 @@
+# CXL-PNM baseline (HPCA'24): LPDDR5X-based CXL expander with channel-level
+# near-memory processing. Capacity, bandwidth and appliance size are the
+# values the work reports: 512 GB and 1.1 TB/s per device, eight devices per
+# appliance. Operands are visible only at the channel interface, so there is
+# no bank-level reuse to exploit -- this is the "coarse-grained" point of
+# Sec. II-C, and it is why the system is channel-bandwidth-limited here.
+name: CXL-PNM
+kind: cxl_pnm
+devices: 8
+capacity_per_device: 512.0e+9      # 4 TB total (LPDDR)
+usable_fraction: 0.90
+bw_per_device: 1.1e+12             # 1.1 TB/s per device (reported)
+stream_efficiency: 0.80
+# The work does not publish the throughput of its PNM engine, so this is the
+# one unsourced value in this file and it is chosen in the baseline's favour:
+# 32 TFLOPS per device is twice the per-device arithmetic throughput of the
+# near-bank GDDR6-AiM devices of the CENT baseline, and it keeps the engine
+# off the critical path throughout the evaluated batch range, so the system
+# is limited by its channel bandwidth rather than by an assumption. [ASSUME]
+flops_per_device: 32.0e+12
+compute_efficiency: 0.80
+
+energy:
+  controller_w_per_device: 20.0
+  engine_full_load_w: 60.0         # ~3.5-4 pJ/FLOP incl. SRAM/NoC
+  static_w: 150.0
+  lpddr_ext_pj_per_bit: 4.5
+  background_w_per_gb: 0.08
+  background_idle_factor: 0.3
+
+# Tensor-parallel collectives. Every evaluated system distributes each layer
+# over its eight devices and therefore pays two ring AllReduces per
+# transformer block; the cost is charged from the device's own interconnect.
+# Hypothetical CXL 3.0/PCIe 6.0 x16 fabric upgrade for this comparison.
+# The original work does not report the endpoint CXL revision or link width.
+interconnect:
+  kind: cxl3-switch
+  link_bytes_per_s_per_dir: 128.0e+9
+  end_to_end_latency_ns: 165
+tp_collectives_per_layer: 2
